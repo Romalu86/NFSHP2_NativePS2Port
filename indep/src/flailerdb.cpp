@@ -314,6 +314,7 @@ bool FlailerRenderManager::IsScreenVisible(std::uint32_t key) const
 }
 
 struct FlailerResources::Storage {
+    platform::NativePromptDevice promptDevice{platform::NativePromptDevice::Original};
     struct FontStorage {
         Font font{};
         std::vector<tTTGlyph> glyphs;
@@ -384,8 +385,147 @@ void decodeObject(FlailerObjectChunk& object,const std::uint8_t* bytes)
     object.authoredMetrics={ReadU32(bytes+68),ReadU32(bytes+72)};
 }
 
+EcstasyUiPlacement raceHudPlacement(std::uint32_t screen,const FlailerObjectChunk& object)
+{
+    using Placement=EcstasyUiPlacement;
+    static const auto chyron=hashString("CHYRON");
+    if (screen==chyron) return Placement::HudLeftDuringRace;
+
+    // The three authored bust camera variants share these overlay widgets.
+    if (screen==0x3EA89B7Cu || screen==0xD4D25EE7u || screen==0xC17316C9u) {
+        switch (object.key) {
+        case 0x001450DDu: return Placement::HudLeft;        // DATE
+        case 0x0000D999u:                                   // REC
+        case 0x61CB41DFu:                                   // REC_DOT
+        case 0x001D380Eu: return Placement::HudRight;       // TIME
+        case 0x76494C5Bu:                                   // BUSTED_DISPLAY
+        case 0x233DFBE1u: return Placement::CenteredCanvas; // BUSTED_SCORE
+        default: return Placement::OriginalCanvas;
+        }
+    }
+    if (screen!=0xF1F1F8E5u && screen!=0xA8EB7AF0u && screen!=0x6283BE92u)
+        return Placement::OriginalCanvas;
+
+    // Split HUD resources already encode the top and bottom player positions
+    // in the shared 640x480 design space.
+    switch (object.parentKey) {
+    case 0x427BE6DDu: // Performance and position readout
+    case 0xC0E6D1B6u: // Live standings rows
+    case 0xC0E6D1B7u:
+    case 0xC0E6D1B8u:
+    case 0xC0E6D1B9u:
+        return Placement::HudLeft;
+    case 0x068E2C75u: // Be the Cop
+    case 0x0B603727u: // Pursuit indicators
+    case 0xA19AE030u:
+    case 0xED9FD777u:
+    case 0xB7A3BC7Au: // Lap and timing panel
+    case 0xC258F297u: // Tracker
+    case 0x0FAF5A2Fu: // Gear
+    case 0xCD086C26u: // Digital gauges
+    case 0x5C9C03A7u: // Score animation travels to the right-side total
+        return Placement::HudRight;
+    case 0x062743F5u: // Radar
+    case 0x8E943093u: // Reticle
+    case 0xBBBB857Cu: // Wrong way
+    case 0xC707E093u: // Race over text
+    case 0xE1CB0B82u: // Tire force
+    case 0xF74C9D43u: // Reset message
+        return Placement::CenteredCanvas;
+    case 0xCD086C25u: // Analogue gauges share a group across two camera styles
+        switch (object.key) {
+        case 0xD2F7FA46u: // SPEED_STRING
+        case 0x70DFB037u: // SPEED_STRING_2
+        case 0xCF9BF6F3u: // SHIFT_UP2
+            return Placement::HudRight;
+        default:
+            return Placement::CenteredCanvas;
+        }
+    case 0x457755C9u: // Race position, split messages and gauge/pursuit art
+        switch (object.key) {
+        case 0x3405C44Eu: // RACE_POSITION
+        case 0x004E27A0u: // BIGRACE_POSITION
+        case 0x9A492668u: // BIGRACE_EXTENSION
+        case 0x84BB420Fu: // BIGRACE_TOTAL
+        case 0x4C769C11u: // BIGRACE_POSITION_2
+        case 0x363392AEu: // Live standings positioning
+        case 0x363392AFu:
+        case 0xA3E3B399u:
+        case 0x6EB9985Du: // Dividers beside the standings
+            return Placement::HudLeft;
+        case 0x89C3AC59u: // RUNNING_SPLIT_TIME
+        case 0xD1E5C713u: // COMPARISON_SPLIT_TIME
+            return Placement::CenteredCanvas;
+        default:
+            return Placement::HudRight;
+        }
+    default:
+        return Placement::OriginalCanvas;
+    }
+}
+
+void bindRaceHudRows(FlailerScreenResource& screen)
+{
+    if (screen.key!=0xF1F1F8E5u && screen.key!=0xA8EB7AF0u && screen.key!=0x6283BE92u)
+        return;
+
+    // Each live standings row owns a number swatch and a status backing.
+    // Timing uses the same backing for the label and value in each row.
+    constexpr std::pair<std::uint32_t,std::uint32_t> timingRows[]={
+        {0x0390D3DFu,0x40E81BE1u}, {0x6486623Bu,0x40E81BE1u},
+        {0x0390D3E0u,0x40E81BE2u}, {0xA8247197u,0x40E81BE2u},
+        {0xEB406FECu,0x40E81BE2u}, {0xF7292837u,0x40E81BE2u},
+        {0x0390D3E1u,0x40E81BE3u}, {0xFC1B498Au,0x40E81BE3u}
+    };
+    for (auto* object=screen.objects.next;object!=&screen.objects;object=object->next) {
+        if (object->kind!=1) continue;
+        std::uint32_t rowKey{};
+        for (const auto& [textKey,backing]:timingRows)
+            if (object->key==textKey) rowKey=backing;
+        for (std::uint32_t row=0;row<4;++row) {
+            if (object->key==0x434907BCu+row) rowKey=0x674D5834u+row; // Position
+            if (object->key==0x604E2C4Eu+row) rowKey=0x9D308573u+row; // Status
+        }
+        if (!rowKey) continue;
+        for (auto* row=screen.objects.next;row!=&screen.objects;row=row->next) {
+            if (row->key==rowKey && row->kind==2) {
+                static_cast<FlailerTextChunk*>(object)->hudRow=static_cast<FlailerBitmapChunk*>(row);
+                break;
+            }
+        }
+    }
+}
+
 void appendObject(FlailerScreenResource& screen,FlailerObjectChunk& object)
 {
+    object.uiPlacement=raceHudPlacement(screen.key,object);
+    if (object.kind==2 && object.uiPlacement==EcstasyUiPlacement::OriginalCanvas) {
+        const auto& bitmap=static_cast<const FlailerBitmapChunk&>(object);
+        if (object.key==0x00163ce5u || object.key==0x631d1512u || object.key==0x2962c18fu ||
+            (object.key==0x67d295cau && object.authoredFlags>=6) || bitmap.textureKey==0x9067abf4u) {
+            // The grid, blueprint and their shadows share a continuous backdrop.
+            object.uiPlacement=EcstasyUiPlacement::CoverCanvas;
+        }
+    }
+    if (screen.key==0xF1F1F8E5u && object.kind==2 && object.parentKey==0x062743F5u) {
+        // The single-player radar and the rear-view mirror use the same
+        // centered canvas. The authored backing spans x=220..414 and the
+        // ten lit segments span x=232..400. Align both to the mirror at x=320.
+        if (object.key==0x6788C391u)object.topLeftX+=3.0f; // RADAR_BG
+        else {
+            object.topLeftX+=4.0f;
+            object.topLeftY+=0.5f;
+        }
+    }
+    if (object.kind==1 && object.parentKey==0x457755C9u &&
+        (object.key==0x89C3AC59u || object.key==0xD1E5C713u) &&
+        object.uiPlacement==EcstasyUiPlacement::CenteredCanvas) {
+        // Retain the spacing between the two checkpoint lines. On solo
+        // and lower split HUDs the first line started inside the radar.
+        object.topLeftX=screen.key==0xF1F1F8E5u ? 320.0f:319.0f;
+        if(screen.key==0xF1F1F8E5u)object.topLeftY+=7.0f;
+        if(screen.key==0x6283BE92u)object.topLeftY+=15.0f;
+    }
     auto* previous=screen.objects.previous;
     previous->next=&object;screen.objects.previous=&object;
     object.previous=previous;object.next=&screen.objects;
@@ -500,10 +640,16 @@ FlailerResources::FlailerResources(std::vector<std::vector<std::uint8_t>> bundle
                         text->textCapacity=ReadU32(record+84);text->formatOptions=ReadU32(record+88);
                         text->color=ReadU32(record+92);
                         text->languageId=ReadU32(record+96);
-                        Require(text->textCapacity && Inside(100,text->textCapacity,child.size),
-                            "Flailer text buffer exceeds its chunk");
+                        const auto stored=std::min<std::size_t>(text->textCapacity,child.size-100);
+                        Require(stored,"Flailer text has no inline buffer");
                         const auto* value=reinterpret_cast<const char*>(record+100);
-                        const auto* end=static_cast<const char*>(std::memchr(value,0,text->textCapacity));
+                        const auto* end=static_cast<const char*>(std::memchr(value,0,stored));
+                        // Some localized bundles store only the initial value.
+                        // The capacity field can still describe the editor's
+                        // buffer. Accept short storage only with a terminator
+                        // inside this chunk; localized text can grow on use.
+                        Require(stored==text->textCapacity || end,"Flailer text buffer exceeds its chunk");
+                        text->textCapacity=static_cast<std::uint32_t>(stored);
                         // Several shipped fixed-width values (for example
                         // four-byte "help") occupy the entire authored span.
                         // Give their exact counted bytes a host terminator;
@@ -530,6 +676,7 @@ FlailerResources::FlailerResources(std::vector<std::vector<std::uint8_t>> bundle
                     }
                 }
                 Require(screen,"Flailer screen container has no screen header");
+                bindRaceHudRows(*screen);
             } else if (chunk.IsContainer()) self(self,chunk.payloadOffset,chunk.size,depth+1,package);
         }
     };
@@ -547,6 +694,15 @@ std::uint64_t FlailerResources::AppendBundle(const std::vector<std::uint8_t>& au
     // owners already use the same model registry and retire on any exception.
     FlailerResources decoded(oneFrontendBundle(authored),root.textures,root.textureCount,root.modelRegistry);
     auto& added=*decoded.storage_;
+    // The reference centers the authored pause panel and puts its logo
+    // above the panel. The full-screen dimmer remains anchored at the edge.
+    if(auto* pause=decoded.FindScreen(0x605d2bf1u)) {
+        for(auto* object=pause->objects.next;object!=&pause->objects;object=object->next) {
+            if(object->kind==2 && static_cast<const FlailerBitmapChunk*>(object)->textureKey==0xc9f75a5bu)
+                object->SetTopLeftX((640.0f-296.0f*object->scaleX)*0.5f);
+            else if(object->topLeftX>=100.0f)object->SetTopLeftX(object->topLeftX-90.0f);
+        }
+    }
     Storage::Bundle block;
     block.token=root.nextBundle;block.offset=root.authored.size();block.size=authored.size();
     const auto prepare=[](auto& destination,auto& members,const auto& incoming) {
@@ -677,6 +833,275 @@ FlailerScreenResource* FlailerResources::FindScreen(std::uint32_t key)
     return nullptr;
 }
 
+namespace {
+constexpr float PcOptionValueCenterX=510.0f;
+constexpr float PcOptionArrowSpacing=100.0f;
+}
+
+void FlailerResources::CloneOptionsPage(std::uint32_t key,std::size_t rows)
+{
+    constexpr auto optionsScreen=0x95ad096bu;
+    const bool augmentOptions=key==optionsScreen;
+    if(FindScreen(key) && (!augmentOptions || FindObject(key,0x20d73d01u)))return;
+    auto* source=FindScreen(0x95ad096bu);
+    const auto* value=static_cast<const FlailerTextChunk*>(FindObject(0x8bc68340u,0x55cb09f2u,1));
+    Require(source && value && rows>=1 && rows<=7,"PC options require the original PAL menu template");
+    auto& root=*storage_;
+    const auto bundle=std::find_if(root.bundles.begin(),root.bundles.end(),[source](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),source)!=entry.screens.end();
+    });
+    Require(bundle!=root.bundles.end(),"PC options have no frontend bundle owner");
+    auto* package=root.packageRoot.next;
+    for(;package!=&root.packageRoot;package=package->next) {
+        const auto* end=&package->screenRoot;
+        auto* screen=end->next;
+        for(;screen!=end && screen!=source;screen=screen->next) {}
+        if(screen==source)break;
+    }
+    Require(package!=&root.packageRoot,"PC options have no frontend package");
+
+    auto page=std::make_unique<FlailerScreenResource>();
+    page->key=key;page->sharedScreenKey=source->sharedScreenKey;page->visibility=1;
+    page->objects.next=page->objects.previous=&page->objects;
+    std::vector<std::unique_ptr<FlailerTextChunk>> text;
+    std::vector<std::unique_ptr<FlailerBitmapChunk>> bitmaps;
+    for(const auto arrow:{0xd1cda594u,0x9345e4a7u,0xedf2e4eeu,0x20d73d01u}) {
+        const auto* origin=static_cast<const FlailerBitmapChunk*>(FindObject(0x8bc68340u,arrow,2));
+        Require(origin,"The PAL Display page is missing a navigation arrow");
+        auto copy=std::make_unique<FlailerBitmapChunk>(*origin);
+        copy->clipObjectKey=0;copy->strip=nullptr;copy->visible=0;
+        if(!augmentOptions && (arrow==0xd1cda594u || arrow==0x9345e4a7u)) {
+            const float offset=arrow==0xd1cda594u?-PcOptionArrowSpacing:PcOptionArrowSpacing;
+            copy->parentKey=0;
+            copy->topLeftX=PcOptionValueCenterX+offset-ScaledBitmapWidth(*copy)*0.5f;
+        }
+        bitmaps.push_back(std::move(copy));
+    }
+    if(augmentOptions) {
+        root.bitmaps.reserve(root.bitmaps.size()+bitmaps.size());
+        bundle->bitmaps.reserve(bundle->bitmaps.size()+bitmaps.size());
+        for(auto& object:bitmaps) {
+            appendObject(*source,*object);++source->bitmapCount;
+            bundle->bitmaps.push_back(object.get());root.bitmaps.push_back(std::move(object));
+        }
+        return;
+    }
+    for(auto& object:bitmaps) {appendObject(*page,*object);++page->bitmapCount;}
+    constexpr auto firstItem=0x52e039f3u;
+    std::array<const FlailerObjectChunk*,7> labels{};
+    for(const auto* object=source->objects.next;object!=&source->objects;object=object->next)
+        if(object->kind==1 && object->key>=firstItem && object->key<firstItem+7)
+            labels[object->key-firstItem]=object;
+    const auto cloneText=[&](const FlailerTextChunk& original) -> FlailerTextChunk& {
+        auto copy=std::make_unique<FlailerTextChunk>(original);
+        copy->strip=nullptr;copy->hudRow=nullptr;copy->text=copy->ownedText.data();
+        appendObject(*page,*copy);++page->textCount;
+        text.push_back(std::move(copy));return *text.back();
+    };
+    for(const auto* object=source->objects.next;object!=&source->objects;object=object->next) {
+        if(object->key==0xab671c9au)continue;
+        bool skip=object->key==0xaa5d7d3fu && object->topLeftY>100.0f+37.0f*static_cast<float>(rows-1);
+        if(object->key==hashString("PC_BACK_TEXT") || object->key==hashString("PC_BACK_ICON"))skip=true;
+        for(std::size_t row=rows;row<labels.size();++row)
+            if(labels[row] && object->parentKey==labels[row]->parentKey)skip=true;
+        if(skip)continue;
+        if(object->kind==1) {
+            auto& copy=cloneText(static_cast<const FlailerTextChunk&>(*object));
+            if(copy.languageId==10005 && copy.topLeftY<30.0f)copy.key=hashString("PC_OPTIONS_TITLE");
+        } else if(object->kind==2) {
+            auto copy=std::make_unique<FlailerBitmapChunk>(static_cast<const FlailerBitmapChunk&>(*object));
+            copy->strip=nullptr;copy->tachometerPoints=nullptr;
+            appendObject(*page,*copy);++page->bitmapCount;bitmaps.push_back(std::move(copy));
+        }
+    }
+    for(std::size_t row=0;row<rows;++row) {
+        Require(labels[row],"Missing authored PC options row template");
+        auto& copy=cloneText(*value);
+        copy.key=hashString("PC_OPTION_VALUE")+static_cast<std::uint32_t>(row);
+        copy.parentKey=labels[row]->parentKey;copy.topLeftX=PcOptionValueCenterX;
+        copy.topLeftY=labels[row]->topLeftY+6.0f;
+        copy.formatOptions=(copy.formatOptions&~1u)|4u;
+        copy.clipObjectKey=0;
+        copy.SetString("");
+    }
+    root.screens.reserve(root.screens.size()+1);
+    root.text.reserve(root.text.size()+text.size());
+    root.bitmaps.reserve(root.bitmaps.size()+bitmaps.size());
+    bundle->screens.reserve(bundle->screens.size()+1);
+    bundle->text.reserve(bundle->text.size()+text.size());
+    bundle->bitmaps.reserve(bundle->bitmaps.size()+bitmaps.size());
+    auto& ring=package->screenRoot;
+    page->next=&ring;page->previous=ring.previous;
+    page->previous->next=page.get();ring.previous=page.get();
+    bundle->screens.push_back(page.get());root.screens.push_back(std::move(page));
+    for(auto& object:text) {bundle->text.push_back(object.get());root.text.push_back(std::move(object));}
+    for(auto& object:bitmaps) {bundle->bitmaps.push_back(object.get());root.bitmaps.push_back(std::move(object));}
+}
+
+FlailerTextChunk& FlailerResources::CloneNativeText(std::uint32_t screen,const FlailerTextChunk& source,std::uint32_t key)
+{
+    if(auto* existing=FindObject(screen,key,1))return static_cast<FlailerTextChunk&>(*existing);
+    auto* page=FindScreen(screen);
+    auto& root=*storage_;
+    const auto bundle=std::find_if(root.bundles.begin(),root.bundles.end(),[page](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),page)!=entry.screens.end();
+    });
+    Require(page && bundle!=root.bundles.end(),"Native menu text has no frontend bundle owner");
+    auto copy=std::make_unique<FlailerTextChunk>(source);
+    copy->key=key;copy->strip=nullptr;copy->hudRow=nullptr;copy->text=copy->ownedText.data();
+    root.text.reserve(root.text.size()+1);
+    bundle->text.reserve(bundle->text.size()+1);
+    appendObject(*page,*copy);++page->textCount;
+    bundle->text.push_back(copy.get());root.text.push_back(std::move(copy));
+    return *root.text.back();
+}
+
+void FlailerResources::AddNativeBackHints()
+{
+    const auto options=FindScreen(0x95ad096bu);
+    const auto bundle=std::find_if(storage_->bundles.begin(),storage_->bundles.end(),[options](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),options)!=entry.screens.end();
+    });
+    if(bundle==storage_->bundles.end())return;
+    const auto backIcon=hashString("PC_BACK_ICON"),backText=hashString("PC_BACK_TEXT");
+    const auto buttons=hashString("BUTTONSOUT");
+    for(auto* page:bundle->screens) {
+        if(page->key==0xae0f8aa1u || FindObject(page->key,backText,1))continue;
+        const FlailerTextChunk* helpIcon=nullptr;
+        const FlailerTextChunk* helpText=nullptr;
+        for(auto* object=page->objects.next;object!=&page->objects;object=object->next) {
+            if(object->kind!=1 || object->topLeftY<400.0f)continue;
+            const auto* field=static_cast<const FlailerTextChunk*>(object);
+            if(field->languageId==12000)helpText=field;
+            if(!field->languageId && field->fontKey==buttons && std::strcmp(field->text,"k")==0)helpIcon=field;
+        }
+        if(!helpIcon || !helpText)continue;
+        auto& icon=CloneNativeText(page->key,*helpIcon,backIcon);
+        auto& text=CloneNativeText(page->key,*helpText,backText);
+        icon.SetTopLeftX(helpIcon->topLeftX+88.0f);
+        icon.SetString("\x87");
+        text.SetTopLeftX(helpText->topLeftX+88.0f);
+        SetLocalizedText(page->key,backText,"Back");
+    }
+}
+
+void FlailerResources::CloneProfileKeyboard(std::uint32_t screen)
+{
+    constexpr std::uint32_t anchor=0x35b2f256u,keyboardGroup=0x670b6fddu;
+    constexpr std::uint32_t cells=0x7b95e55cu,caret=0xc01086b5u;
+    if(FindObject(screen,anchor,2))return;
+    auto* page=FindScreen(screen);
+    auto* source=FindScreen(0x617a4e0au);
+    auto& root=*storage_;
+    const auto bundle=std::find_if(root.bundles.begin(),root.bundles.end(),[page](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),page)!=entry.screens.end();
+    });
+    Require(page && source && bundle!=root.bundles.end(),"Profile editor has no authored keyboard template");
+    for(const auto* object=source->objects.next;object!=&source->objects;object=object->next) {
+        if(object->parentKey!=keyboardGroup && object->parentKey!=cells && object->key!=caret)continue;
+        if(object->kind==1) {
+            CloneNativeText(screen,static_cast<const FlailerTextChunk&>(*object),object->key).visible=0;
+        } else if(object->kind==2) {
+            auto bitmap=std::make_unique<FlailerBitmapChunk>(static_cast<const FlailerBitmapChunk&>(*object));
+            bitmap->strip=nullptr;bitmap->visible=0;
+            root.bitmaps.reserve(root.bitmaps.size()+1);bundle->bitmaps.reserve(bundle->bitmaps.size()+1);
+            appendObject(*page,*bitmap);++page->bitmapCount;
+            bundle->bitmaps.push_back(bitmap.get());root.bitmaps.push_back(std::move(bitmap));
+        }
+    }
+    Require(FindObject(screen,anchor,2),"Profile keyboard is missing its authored anchor");
+}
+
+void FlailerResources::AddNativeAudioMaster(std::uint32_t screen)
+{
+    const auto master=hashString("MENUITEM_0");
+    if(FindObject(screen,master))return;
+    auto* page=FindScreen(screen);
+    if(!page)return;
+    auto& root=*storage_;
+    const auto bundle=std::find_if(root.bundles.begin(),root.bundles.end(),[page](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),page)!=entry.screens.end();
+    });
+    Require(bundle!=root.bundles.end(),"Audio master volume requires the PAL Audio menu");
+    auto* first=static_cast<FlailerTextChunk*>(FindObject(screen,0x52e039f3u,1));
+    auto* bar=static_cast<FlailerBitmapChunk*>(FindObject(screen,0xa29f7a16u,2));
+    auto* marker=static_cast<FlailerBitmapChunk*>(FindObject(screen,0xc866642bu,2));
+    const auto* firstMask=static_cast<const FlailerBitmapChunk*>(FindObject(screen,0x6e34e350u,2));
+    Require(first && bar && marker && firstMask,"Audio master row is missing its slider template");
+    auto text=std::make_unique<FlailerTextChunk>(*first);
+    text->strip=nullptr;text->text=text->ownedText.data();text->languageId=0;text->key=master;
+    const auto group=hashString("MENUITEM_0_GROUP");
+    text->parentKey=group;
+    auto base=std::make_unique<FlailerBitmapChunk>(*bar);
+    base->key=hashString("PC_MASTER_BAR");base->strip=nullptr;base->parentKey=group;
+    auto handle=std::make_unique<FlailerBitmapChunk>(*marker);
+    handle->key=hashString("PC_MASTER_MARKER");handle->strip=nullptr;handle->parentKey=group;
+    root.text.reserve(root.text.size()+1);bundle->text.reserve(bundle->text.size()+1);
+    auto mask=std::make_unique<FlailerBitmapChunk>(*firstMask);
+    mask->key=hashString("MI_0_MASK");mask->strip=nullptr;mask->parentKey=group;
+    root.bitmaps.reserve(root.bitmaps.size()+3);bundle->bitmaps.reserve(bundle->bitmaps.size()+3);
+    for(auto* object=page->objects.next;object!=&page->objects;object=object->next) {
+        if(object->parentKey==0x457755c9u)continue;
+        if(object->topLeftY>=70.0f && object->topLeftY<450.0f &&
+           (object->parentKey==0xa6bbd61fu || object->clipObjectKey==0xc67cfb4au ||
+            std::strncmp(object->name.data(),"MENUITEM_",9)==0 ||
+            std::strncmp(object->name.data(),"AUDIO_BAR",9)==0 ||
+            std::strncmp(object->name.data(),"MI_",3)==0 ||
+            object->key==0x2932dfcau))object->SetTopLeftY(object->topLeftY+37.0f);
+    }
+    appendObject(*page,*text);++page->textCount;
+    bundle->text.push_back(text.get());root.text.push_back(std::move(text));
+    for(auto* slider:{&base,&handle,&mask}) {
+        appendObject(*page,**slider);++page->bitmapCount;
+        bundle->bitmaps.push_back(slider->get());root.bitmaps.push_back(std::move(*slider));
+    }
+}
+
+void FlailerResources::AddNativeOptionSliders(std::uint32_t screen,std::size_t rows)
+{
+    const auto firstBar=hashString("PC_OPTION_SLIDER_BAR");
+    if(FindObject(screen,firstBar,2))return;
+    auto* page=FindScreen(screen);
+    const auto* track=static_cast<const FlailerBitmapChunk*>(FindObject(0xe116761cu,0xa29f7a16u,2));
+    const auto* thumb=static_cast<const FlailerBitmapChunk*>(FindObject(0xe116761cu,0xc866642bu,2));
+    Require(page && track && thumb,"Options sliders require the Audio artwork");
+    auto& root=*storage_;
+    const auto bundle=std::find_if(root.bundles.begin(),root.bundles.end(),[page](const auto& entry) {
+        return std::find(entry.screens.begin(),entry.screens.end(),page)!=entry.screens.end();
+    });
+    Require(bundle!=root.bundles.end(),"Options sliders have no screen bundle owner");
+    bundle->bitmaps.reserve(bundle->bitmaps.size()+2*rows);
+    root.bitmaps.reserve(root.bitmaps.size()+2*rows);
+    for(std::size_t row=0;row<rows;++row) {
+        const auto offset=static_cast<std::uint32_t>(row);
+        const auto* label=FindObject(screen,0x52e039f3u+offset,1);
+        Require(label,"Slider row has no label");
+        for(const auto* artwork:{track,thumb}) {
+            auto image=std::make_unique<FlailerBitmapChunk>(*artwork);
+            image->key=(artwork==track?firstBar:hashString("PC_OPTION_SLIDER_THUMB"))+offset;
+            image->clipObjectKey=0;image->strip=nullptr;image->visible=0;image->nativeSliderItem=0;
+            image->parentKey=label->parentKey;
+            image->topLeftX=PcOptionValueCenterX-ScaledBitmapWidth(*image)*0.5f;
+            image->topLeftY=label->topLeftY+14.0f+artwork->topLeftY-track->topLeftY;
+            appendObject(*page,*image);++page->bitmapCount;
+            bundle->bitmaps.push_back(image.get());root.bitmaps.push_back(std::move(image));
+        }
+    }
+}
+
+platform::NativePromptDevice FlailerResources::PromptDevice() const noexcept
+{return storage_->promptDevice;}
+
+void FlailerResources::SetPromptDevice(platform::NativePromptDevice device)
+{
+    if(storage_->promptDevice==device)return;
+    storage_->promptDevice=device;
+    for(const auto& text:storage_->text)if(!text->nativePhysicalButtonLabel)text->DeleteFlailerStrip();
+    static const auto replayToolbar=hashString("REPLAYBOTTOM_NEW");
+    for(const auto& bitmap:storage_->bitmaps)
+        if(bitmap->textureKey==replayToolbar)bitmap->DeleteFlailerStrip();
+}
+
 FlailerObjectChunk* FlailerResources::FindObject(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t kind)
 {
     auto* screen=FindScreen(screenKey);
@@ -764,6 +1189,38 @@ std::int32_t FlailerResources::SetLocalizedText(std::uint32_t screenKey,std::uin
         field.SetString(retained.c_str());
     } else field.SetString(value);
     return static_cast<std::int32_t>(length);
+}
+
+void FlailerResources::SetFittedText(std::uint32_t screen,std::uint32_t key,const LanguageManager* language,
+    const char* value,std::uint32_t followingColumn)
+{
+    auto* text=static_cast<FlailerTextChunk*>(FindObject(screen,key,1));
+    if(!text)return;
+    SetLocalizedText(screen,key,value);
+    if(!text->nativeFitBaseX) {
+        text->nativeFitBaseX=text->scaleX;text->nativeFitBaseY=text->scaleY;
+    }
+    text->SetScaleX(text->nativeFitBaseX);text->SetScaleY(text->nativeFitBaseY);
+    float left=4.0f,right=636.0f;
+    int clipLeft{},clipTop{},clipRight{},clipBottom{};
+    if(text->clipObjectKey && GetBoundingBox(screen,text->clipObjectKey,clipLeft,clipTop,clipRight,clipBottom,language)) {
+        left=static_cast<float>(clipLeft)+5.0f;right=static_cast<float>(clipRight)-2.0f;
+    }
+    if(const auto* next=followingColumn?FindObject(screen,followingColumn,1):nullptr) {
+        float x{},y{};
+        const auto& column=static_cast<const FlailerTextChunk&>(*next);
+        if(column.formatOptions&(1u|4u))GetTopLeft(column,x,y,language);
+        else x=column.topLeftX;
+        if(x>text->topLeftX)right=std::min(right,x-4.0f);
+    }
+    float width=right-text->topLeftX;
+    if(text->formatOptions&1u)width=text->topLeftX-left;
+    else if(text->formatOptions&4u)width=2.0f*std::min(width,text->topLeftX-left);
+    const auto measured=ScaledTextWidth(*text,language);
+    if(width>0 && measured>width) {
+        const auto scale=width/measured;
+        text->SetScaleX(text->nativeFitBaseX*scale);text->SetScaleY(text->nativeFitBaseY*scale);
+    }
 }
 
 void FlailerResources::SetObjectVisibility(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t value)
@@ -894,6 +1351,42 @@ float FlailerResources::ScaledTextHeight(const FlailerTextChunk& text) const
 }
 
 namespace {
+platform::NativePromptDevice nativeHelpDevice(const FlailerResources& resources,const FlailerTextChunk& text)
+{
+    return text.nativePhysicalButtonLabel?text.nativePhysicalButtonDevice:resources.PromptDevice();
+}
+
+std::uint8_t nativeHelpCharacter(platform::NativePromptDevice device,const Font& font,std::uint8_t character)
+{
+    static const auto buttonFont=hashString("BUTTONSOUT");
+    if(device==platform::NativePromptDevice::Original ||
+        font.key!=buttonFont || IsHelpCharacter(character))return character;
+    const auto& glyphs=flailerTextRasterState.helpGlyphs;
+    const auto found=std::find(glyphs.begin(),glyphs.end(),character);
+    return found==glyphs.end()?character:static_cast<std::uint8_t>(0x80u+(found-glyphs.begin()));
+}
+
+const char* nativeHelpLabel(platform::NativePromptDevice device,std::uint8_t character)
+{
+    constexpr const char* keyboard[]{"Enter","BS","UP","DN","LT","RT","Enter","Esc","Space","F1",
+        "Q","E","1","2","L3","N","WASD","W","S","A","D","ARWS","UP","DN","LT",nullptr,
+        nullptr,nullptr,"Del",nullptr};
+    constexpr const char* xbox[]{"Menu","View","Up","Down","Left","Right","A","B","X","Y","LB","RB","LT",
+        "RT","LS","RS","LS","LS","LS","LS","LS","RS","RS","RS","RS",nullptr,
+        nullptr,nullptr,nullptr,nullptr};
+    if(!IsHelpCharacter(character))return nullptr;
+    const auto index=character-0x80u;
+    if(device==platform::NativePromptDevice::Keyboard)return keyboard[index];
+    if(device==platform::NativePromptDevice::Xbox)return xbox[index];
+    return nullptr;
+}
+
+float nativeHelpWidth(platform::NativePromptDevice device,std::uint8_t character,const char* label)
+{
+    if(device==platform::NativePromptDevice::Xbox && character>=0x80 && character<=0x89)return 24.0f;
+    return std::max(19.0f,10.0f+6.0f*static_cast<float>(std::strlen(label)));
+}
+
 float unscaledFlailerTextWidth(const FlailerResources& resources,const FlailerTextChunk& text,
     const LanguageManager* language)
 {
@@ -907,8 +1400,13 @@ float unscaledFlailerTextWidth(const FlailerResources& resources,const FlailerTe
         value=translated ? translated : "";
     }
     float width=0.0f;
-    for (const auto* cursor=reinterpret_cast<const unsigned char*>(value);*cursor;++cursor)
-        if (const auto* glyph=font->characters[*cursor]) width+=glyph->advance;
+    const auto device=nativeHelpDevice(resources,text);
+    for (const auto* cursor=reinterpret_cast<const unsigned char*>(value);*cursor;++cursor) {
+        const auto prompt=nativeHelpCharacter(device,*font,*cursor);
+        if(const auto* label=nativeHelpLabel(device,prompt))
+            width+=nativeHelpWidth(device,prompt,label)/std::max(0.01f,text.scaleX);
+        else if (const auto* glyph=font->characters[*cursor]) width+=glyph->advance;
+    }
     return width;
 }
 }
@@ -1164,9 +1662,8 @@ FlailerStrip* FlailerStripPool::Create(FlailerObjectChunk& object,std::vector<Fl
     Discard(object);
     auto strip=std::make_unique<FlailerStrip>();
     strip->pool=this;strip->polygons=std::move(polygons);
-    // The released Player fills only this authored race-over text group
-    // (PAL181558 -> RenderTextIntoGroup). Keep all ordinary HUD/menu and
-    // immediate polygons on their established canvas and edge anchors.
+    strip->uiPlacement=object.uiPlacement;
+    // Race-over text can also be submitted by the result screen owner.
     if (object.kind==1 && object.parentKey==0xC707E093u)
         strip->uiPlacement=EcstasyUiPlacement::CenteredCanvas;
     // Publish only after the pool accepted ownership. A failed vector growth
@@ -1369,13 +1866,116 @@ void FlailerTextChunk::RenderCharacter(const tTTGlyph& glyph,const Font& font,
 }
 
 float FlailerTextChunk::RenderHelpCharacter(FlailerResources& resources,float x,float y,
-    std::uint8_t character,float alphaScale)
+    std::uint8_t character,float alphaScale,const char* labelOverride)
 {
     Require(IsHelpCharacter(character),"Help glyph is outside the authored mapping");
+    const auto device=nativeHelpDevice(resources,*this);
+    if(nativePhysicalButtonLabel && device==platform::NativePromptDevice::Xbox) {
+        if(character==0x87)character=0x89;
+        else if(character==0x89)character=0x87;
+    }
+    if(const auto* label=labelOverride?labelOverride:nativeHelpLabel(device,character)) {
+        const auto* letters=resources.FindFont(hashString("FONT_A"));
+        if(letters && letters->GetTextureInfo(resources)) {
+            const float width=nativeHelpWidth(device,character,label);
+            const float z=static_cast<float>(static_cast<std::int8_t>(authoredFlags));
+            const auto alpha=static_cast<std::uint32_t>(std::clamp(alphaScale,0.0f,1.0f)*128.0f)<<24;
+            const auto* solid=letters->characters['I'];
+            const float u=solid ? (solid->atlasPosition[0]+std::floor(solid->size[0]*0.5f)+0.5f)/letters->textureWidth : 0.0f;
+            const float v=solid ? (solid->atlasPosition[1]+std::floor(solid->size[1]*0.5f)+0.5f)/letters->textureHeight : 0.0f;
+            const auto quad=[&](const std::array<float,4>& xs,const std::array<float,4>& ys,std::uint32_t rgb) {
+                if(!solid)return;
+                const auto& lo=flailerTextRasterState.minimum;
+                const auto& hi=flailerTextRasterState.maximum;
+                const auto [left,right]=std::minmax_element(xs.begin(),xs.end());
+                const auto [top,bottom]=std::minmax_element(ys.begin(),ys.end());
+                if(*right<=lo[0] || *left>=hi[0] || *bottom<=lo[1] || *top>=hi[1])return;
+                auto& polygon=strip->AddPoly(letters->texture);
+                for(std::size_t i=0;i<polygon.vertices.size();++i) {
+                    polygon.vertices[i].position={
+                        std::clamp(xs[i],lo[0],hi[0]),std::clamp(ys[i],lo[1],hi[1]),z,0.0f};
+                    polygon.vertices[i].textureCoordinate={u,v,1.0f};
+                    polygon.vertices[i].color=alpha|rgb;
+                }
+                polygon.rasterState[2]=1;
+            };
+            const auto panel=[&](float left,float top,float right,float bottom,std::uint32_t rgb) {
+                quad({left,right,right,left},{top,top,bottom,bottom},rgb);
+            };
+            constexpr std::uint32_t edge=0x00b8b8b8u,cap=0x00222222u,white=0x00ffffffu;
+            const float cx=x+(width-3.0f)*0.5f,cy=y+10.0f;
+            const bool xbox=device==platform::NativePromptDevice::Xbox;
+            if(xbox && character>=0x86 && character<=0x89) {
+                // Xbox face buttons, in A/B/X/Y order. Match the donor's
+                // filled circles and keep the glyphs in the original UI font.
+                constexpr std::uint32_t faceColors[]{0x0030a030u,0x003030d0u,0x00d86830u,0x0010b0d8u};
+                constexpr float radius=9.5f;
+                constexpr std::array<float,9> rows{{-1,-0.92388f,-0.707107f,-0.382683f,0,
+                    0.382683f,0.707107f,0.92388f,1}};
+                const auto rowWidth=[radius](float row) {return radius*std::sqrt(std::max(0.0f,1.0f-row*row));};
+                for(std::size_t i=0;i+1<rows.size();++i) {
+                    const float a=rowWidth(rows[i]),b=rowWidth(rows[i+1]);
+                    quad({cx-a,cx+a,cx+b,cx-b},{cy+radius*rows[i],cy+radius*rows[i],
+                        cy+radius*rows[i+1],cy+radius*rows[i+1]},faceColors[character-0x86]);
+                }
+            } else if(xbox && character>=0x82 && character<=0x85) {
+                // Use a physical D-pad icon for directions. LT/RT are
+                // reserved for the two trigger inputs.
+                const auto cross=[&](float reach,float arm,std::uint32_t rgb) {
+                    panel(cx-arm,cy-reach,cx+arm,cy-arm,rgb);
+                    panel(cx-reach,cy-arm,cx+reach,cy+arm,rgb);
+                    panel(cx-arm,cy+arm,cx+arm,cy+reach,rgb);
+                };
+                cross(9.5f,3.5f,edge);cross(8.5f,2.5f,cap);
+                constexpr float dx[]{0,0,-1,1},dy[]{-1,1,0,0};
+                const auto direction=character-0x82u;
+                const float a=dx[direction],b=dy[direction],ax=cx+5.0f*a,ay=cy+5.0f*b;
+                quad({ax+2.5f*a,ax-1.5f*a-2.0f*b,ax-1.5f*a+2.0f*b,ax-1.5f*a+2.0f*b},
+                    {ay+2.5f*b,ay-1.5f*b+2.0f*a,ay-1.5f*b-2.0f*a,ay-1.5f*b-2.0f*a},white);
+                return width;
+            } else {
+                const float top=xbox?y+3.0f:y+1.0f,bottom=xbox?y+17.0f:y+19.0f;
+                panel(x,top,x+width-3,bottom,edge);
+                panel(x+1,top+1,x+width-4,bottom-1,cap);
+                if(xbox && character==0x80) {
+                    for(float offset:{-3.0f,0.0f,3.0f})panel(cx-4.0f,cy+offset,cx+4.0f,cy+offset+1.0f,white);
+                    return width;
+                }
+                if(xbox && character==0x81) {
+                    panel(cx-5,cy-4,cx+2,cy+2,white);
+                    panel(cx-4,cy-3,cx+1,cy+1,cap);
+                    panel(cx-1,cy-1,cx+6,cy+5,white);
+                    panel(cx,cy,cx+5,cy+4,cap);
+                    return width;
+                }
+            }
+            const auto savedX=scaleX,savedY=scaleY;
+            const auto savedColor=color;
+            scaleX=0.72f;scaleY=0.72f;color=0x80ffffffu;
+            float textWidth=0.0f;
+            for(const auto* p=label;*p;++p)
+                if(const auto* glyph=letters->characters[static_cast<unsigned char>(*p)])textWidth+=glyph->advance*scaleX;
+            float position[3]{cx-textWidth*0.5f,y+4.0f,z};
+            for(const auto* p=label;*p;++p)
+                if(const auto* glyph=letters->characters[static_cast<unsigned char>(*p)]) {
+                    if(xbox)position[1]=cy-glyph->size[1]*scaleY*0.5f;
+                    RenderCharacter(*glyph,*letters,position,flailerTextRasterState.minimum.data(),
+                        flailerTextRasterState.maximum.data(),alphaScale);
+                    position[0]+=glyph->advance*scaleX;
+                }
+            scaleX=savedX;scaleY=savedY;color=savedColor;
+            return width;
+        }
+    }
     // BUTTONSOUT is the actual font key consumed by141E20, not the text font.
     const auto* font=resources.FindFont(hashString("BUTTONSOUT"));
     if (!font || !font->GetTextureInfo(resources)) return 0.0f;
-    const auto mapped=flailerTextRasterState.helpGlyphs[character-0x80u];
+    auto index=static_cast<std::size_t>(character-0x80u);
+    if(!nativePhysicalButtonLabel && device==platform::NativePromptDevice::PlayStation) {
+        if(index==7)index=9;
+        else if(index==9)index=7;
+    }
+    const auto mapped=flailerTextRasterState.helpGlyphs[index];
     const auto* glyph=font->characters[mapped];
     if (!glyph) return 0.0f;
     const float position[3]{x,y,static_cast<float>(static_cast<std::int8_t>(authoredFlags))};
@@ -1409,12 +2009,13 @@ void FlailerRenderManager::AddFlailerStrip(FlailerObjectChunk& object)
 }
 
 void FlailerRenderManager::SubmitPolygon(FlailerStripPool& pool,const EditorMarkerTexture* texture,
-    const FlailerPoly& polygon,std::int32_t depth)
+    const FlailerPoly& polygon,std::int32_t depth,EcstasyUiPlacement placement)
 {
     Require(texture && depth>=0 && static_cast<std::size_t>(depth)<layers.size(),
         "Immediate frontend polygon has no texture or valid depth");
     FlailerObjectChunk submission;
     submission.authoredFlags=static_cast<std::uint8_t>(depth);
+    submission.uiPlacement=placement;
     submission.CreateFlailerStrip(pool,texture,1.0f);
     submission.strip->AddPoly(texture)=polygon;
     AddFlailerStrip(submission);
@@ -1444,8 +2045,9 @@ void FlailerRenderManager::RenderTextIntoRectangle(FlailerResources& resources,c
     const auto delimiter=[](std::int32_t value){return value==' ' || value=='\t' || value==0;};
     const auto* first=reinterpret_cast<const unsigned char*>(message);
     auto* cursor=first;
+    const auto device=nativeHelpDevice(resources,text);
     while (*cursor) {
-        const auto character=*cursor++;
+        const auto character=nativeHelpCharacter(device,*font,*cursor++);
         if (IsHelpCharacter(character)) {
             x+=text.RenderHelpCharacter(resources,x,y,character,alphaScale);
             continue;
@@ -1646,10 +2248,46 @@ std::int32_t FlailerRenderManager::RenderObjectList(FlailerResources& resources,
     return count;
 }
 
+namespace {
+void fitRaceHudRow(FlailerResources& resources,FlailerTextChunk& text)
+{
+    const float margin=1.0f;
+    auto& row=*text.hudRow;
+    const float rowWidth=static_cast<float>(convertFloatToInt32(resources.ScaledBitmapWidth(row)))-2.0f*margin;
+    const float rowHeight=static_cast<float>(convertFloatToInt32(resources.ScaledBitmapHeight(row)))-2.0f*margin;
+    if (rowWidth<=0 || rowHeight<=0) return;
+    float left=std::numeric_limits<float>::max(),top=left,right=-left,bottom=-left;
+    for (auto* batch=text.strip;batch;batch=batch->nextTexture.get()) {
+        for (const auto& polygon:batch->polygons) for (const auto& vertex:polygon.vertices) {
+            left=std::min(left,vertex.position[0]); top=std::min(top,vertex.position[1]);
+            right=std::max(right,vertex.position[0]); bottom=std::max(bottom,vertex.position[1]);
+        }
+    }
+    if (right<=left || bottom<=top) return;
+    const float scale=std::min({1.0f,rowWidth/(right-left),rowHeight/(bottom-top)});
+    const float width=(right-left)*scale,height=(bottom-top)*scale;
+    float origin=left;
+    if (text.formatOptions&1u) origin=right-width;
+    else if (text.formatOptions&4u) origin=(left+right-width)*0.5f;
+    const float rowLeft=row.topLeftX+margin;
+    const float x=std::clamp(origin,rowLeft,rowLeft+std::max(0.0f,rowWidth-width));
+    const float y=row.topLeftY+margin+(rowHeight-height)*0.5f;
+    for (auto* batch=text.strip;batch;batch=batch->nextTexture.get()) {
+        for (auto& polygon:batch->polygons) for (auto& vertex:polygon.vertices) {
+            vertex.position[0]=x+(vertex.position[0]-left)*scale;
+            vertex.position[1]=y+(vertex.position[1]-top)*scale;
+        }
+    }
+}
+}
+
 void FlailerRenderManager::RenderFlailerText(FlailerResources& resources,FlailerTextChunk& text,
     const LanguageManager* language,const float* minimum,const float* maximum,float alphaScale)
 {
-    if (text.DoWeNeedToBuildFlailerStrip(alphaScale))text.Render(resources,language,minimum,maximum,alphaScale);
+    if (text.DoWeNeedToBuildFlailerStrip(alphaScale)) {
+        text.Render(resources,language,text.hudRow?nullptr:minimum,text.hudRow?nullptr:maximum,alphaScale);
+        if (text.strip && text.hudRow) fitRaceHudRow(resources,text);
+    }
     AddFlailerStrip(text);
 }
 
@@ -1743,6 +2381,7 @@ void FlailerTextChunk::Render(FlailerResources& resources,const LanguageManager*
     if (formatOptions&1u)x-=width;else if (formatOptions&4u)x-=width*0.5f;
     const float initialX=x,initialY=y;bool afterSpace=false;
     const float z=static_cast<float>(static_cast<std::int8_t>(authoredFlags));
+    const auto device=nativeHelpDevice(resources,*this);
     for (auto* cursor=first;cursor<end && *cursor;++cursor) {
         if ((formatOptions&0x20u) && afterSpace) {
             const float nextWordWidth=FlailerTextDistanceToNextChar(cursor,' ',font)*scaleX;
@@ -1751,7 +2390,7 @@ void FlailerTextChunk::Render(FlailerResources& resources,const LanguageManager*
             }
             afterSpace=false;
         }
-        const auto character=static_cast<unsigned char>(*cursor);
+        const auto character=nativeHelpCharacter(device,*font,static_cast<unsigned char>(*cursor));
         if (character==' ')afterSpace=true;
         if (IsHelpCharacter(character)) {x+=RenderHelpCharacter(resources,x,y,character,alphaScale);continue;}
         const auto* glyph=font->characters[character];if (!glyph)continue;
@@ -1789,6 +2428,71 @@ void FlailerBitmapChunk::SetNativeFullscreenMovie(bool enabled)
     if(nativeFullscreenMovie!=enabled) {nativeFullscreenMovie=enabled;updateKind=3;}
 }
 
+namespace {
+bool DrawNativeReplayToolbar(FlailerResources& resources,FlailerBitmapChunk& bitmap,
+    const FlailerPoly& base,float width,float height,float alphaScale)
+{
+    static const auto toolbar=hashString("REPLAYBOTTOM_NEW");
+    if(bitmap.textureKey!=toolbar || width<402.0f || height<61.0f)return false;
+    const auto device=resources.PromptDevice();
+    if(device!=platform::NativePromptDevice::Keyboard && device!=platform::NativePromptDevice::Xbox)return false;
+    const auto* font=resources.FindFont(hashString("FONT_A"));
+    const auto* atlas=font?font->GetTextureInfo(resources):nullptr;
+    if(!atlas)return false;
+
+    struct Button {
+        int first,last;
+        std::uint8_t glyph;
+        const char* key;
+        const char* xbox;
+    };
+    // Measured from REPLAYBOTTOM_NEW. These are the nine baked button
+    // cells; the captions and the timeline remain the original artwork.
+    constexpr Button buttons[]{
+        {16,39,0x8a,"Q","LB"},{62,89,0x84,"Left","Left"},{107,131,0x88,"Space","X"},
+        {153,177,0x86,"Enter","A"},{196,221,0x87,"C","B"},{241,265,0x89,"F1","Y"},
+        {281,309,0x85,"Right","Right"},{325,354,0x81,"BS","View"},{373,399,0x80,"Esc","Menu"}};
+    bitmap.strip->texture=atlas; // The linked background texture is drawn first.
+    const auto& start=base.vertices[0];
+    const auto& end=base.vertices[2];
+    const auto x=[&](float at) {return start.position[0]+(end.position[0]-start.position[0])*at/width;};
+    const auto y=[&](float at) {return start.position[1]+(end.position[1]-start.position[1])*at/height;};
+    const auto u=[&](float at) {return start.textureCoordinate[0]+(end.textureCoordinate[0]-start.textureCoordinate[0])*at/width;};
+    const auto v=[&](float at) {return start.textureCoordinate[1]+(end.textureCoordinate[1]-start.textureCoordinate[1])*at/height;};
+    const auto draw=[&](float left,float top,float right,float bottom,float sampleLeft,float sampleRight) {
+        auto& quad=bitmap.strip->AddPoly(bitmap.texture);
+        quad=base;
+        for(std::size_t i=0;i<quad.vertices.size();++i) {
+            const bool atRight=i==1 || i==2,atBottom=i>=2;
+            auto& vertex=quad.vertices[i];
+            vertex.position[0]=x(atRight?right:left);vertex.position[1]=y(atBottom?bottom:top);
+            vertex.textureCoordinate[0]=u(atRight?sampleRight:sampleLeft);
+            vertex.textureCoordinate[1]=v(atBottom?bottom:top);
+        }
+        if(MaybeClipPoly(&quad,flailerTextRasterState.minimum.data(),flailerTextRasterState.maximum.data()))
+            bitmap.strip->RemovePoly(quad);
+    };
+    constexpr float top=29.0f,bottom=61.0f;
+    draw(0.0f,0.0f,width,top,0.0f,width);
+    draw(0.0f,bottom,width,height,0.0f,width);
+    float cursor=0.0f;
+    FlailerTextChunk prompt;
+    prompt.strip=bitmap.strip;prompt.authoredFlags=bitmap.authoredFlags;
+    for(const auto& button:buttons) {
+        const float left=static_cast<float>(button.first)-2.0f,right=static_cast<float>(button.last)+3.0f;
+        draw(cursor,top,left,bottom,cursor,left);
+        draw(left,top,right,bottom,left-0.5f,left-0.5f);
+        const auto* label=device==platform::NativePromptDevice::Keyboard?button.key:button.xbox;
+        prompt.RenderHelpCharacter(resources,x(0.5f*(left+right))-(nativeHelpWidth(device,button.glyph,label)-3.0f)*0.5f,
+            y(45.0f)-10.0f,button.glyph,alphaScale,label);
+        cursor=right;
+    }
+    draw(cursor,top,width,bottom,cursor,width);
+    prompt.strip=nullptr;
+    return true;
+}
+}
+
 void FlailerRenderManager::RenderSingleFlailerBitmap(FlailerResources& resources,
     FlailerBitmapChunk& bitmap,float alphaScale,float textureTime)
 {
@@ -1821,10 +2525,10 @@ void FlailerRenderManager::RenderSingleFlailerBitmap(FlailerResources& resources
     const float paddedHeight=static_cast<float>(next_power_of_2(static_cast<std::uint32_t>(rawHeight)));
     const bool fullMovie=bitmap.nativeFullscreenMovie &&
         (bitmap.texture->key==0xc3f0caefu || bitmap.texture->key==0xf9117c29u);
-    const auto drawWidth=fullMovie?640:convertFloatToInt32(width*bitmap.scaleX);
-    const auto drawHeight=fullMovie?480:convertFloatToInt32(height*bitmap.scaleY);
+    const auto drawWidth=convertFloatToInt32(width*bitmap.scaleX);
+    const auto drawHeight=convertFloatToInt32(height*bitmap.scaleY);
     const float left=fullMovie?0.0f:bitmap.topLeftX,top=fullMovie?0.0f:bitmap.topLeftY;
-    auto& polygon=bitmap.strip->AddPoly(bitmap.texture);
+    FlailerPoly polygon{};
     for (std::size_t index=0;index<4;++index) {
         const bool right=index==1 || index==2,bottom=index>=2;
         polygon.vertices[index].textureCoordinate={scroll[0]+width*bitmap.textureCoordinates[index][0]/paddedWidth+
@@ -1851,9 +2555,11 @@ void FlailerRenderManager::RenderSingleFlailerBitmap(FlailerResources& resources
     }
     // Single bitmap leaves ePoly+97's constructor value1 unchanged.
     configureFlailerPolygon(polygon,bitmap.colors,alphaScale,true);
-    if (!fullMovie && !rotated && MaybeClipPoly(&polygon,flailerTextRasterState.minimum.data(),flailerTextRasterState.maximum.data()))
-        bitmap.strip->RemovePoly(polygon);
-    if(fullMovie)bitmap.strip->uiPlacement=EcstasyUiPlacement::OriginalCanvas;
+    const bool nativeReplay=!rotated && DrawNativeReplayToolbar(resources,bitmap,polygon,width,height,alphaScale);
+    if (!nativeReplay && (fullMovie || rotated ||
+        !MaybeClipPoly(&polygon,flailerTextRasterState.minimum.data(),flailerTextRasterState.maximum.data())))
+        bitmap.strip->AddPoly(bitmap.texture)=polygon;
+    if(fullMovie)bitmap.strip->uiPlacement=EcstasyUiPlacement::FitImage;
     AddFlailerStrip(bitmap);
 }
 

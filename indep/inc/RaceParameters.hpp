@@ -9,7 +9,7 @@ struct CarDriverCharacter;
 extern "C" {
 #endif
 
-enum { RACE_DRIVER_LIMIT = 14 };
+enum { RACE_DRIVER_LIMIT = 14, PLAYER_NAME_CAPACITY = 16 };
 
 typedef enum PlayerHudFlag {
     PLAYER_HUD_SPLIT_TIME = 0x004,
@@ -36,7 +36,7 @@ typedef struct PlayerSettings {
     int8_t gearInputMode;
     int8_t cameraView;
     uint8_t authoredTimeDisplayOption;
-    char playerName[12];
+    char playerName[PLAYER_NAME_CAPACITY];
     int32_t bestTotalTimeTicks;
     int32_t bestLapTimeTicks;
 } PlayerSettings;

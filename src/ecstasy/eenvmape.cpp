@@ -1,4 +1,5 @@
 // Source identities and raw PAL boundaries: ENVIRONMENT69_SOURCE_PROOF.json.
+#include "indep/inc/NativeRenderSettings.hpp"
 #include "indep/inc/eEnvMap.hpp"
 #include "indep/inc/NativeRenderSettings.hpp"
 #include "indep/inc/CameraMover.hpp"
@@ -169,6 +170,7 @@ void EnvironmentMap::UpdateCameras(const float viewEye[3],const float reflection
         if(primary!=previousPrimary_)select(schedulePhase_);
     }
     previousPrimary_=primary;
+    if(nativeRenderSettings().reflections)due.fill(true);
     // Several logical updates can precede one displayed frame. Keep the
     // union until native submission succeeds; replacing this mask on each
     // update can permanently skip alternating faces at30FPS with60Hz logic.

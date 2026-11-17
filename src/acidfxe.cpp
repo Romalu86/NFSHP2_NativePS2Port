@@ -139,9 +139,14 @@ WorldParticleGroup* acquireParticleGroup(WorldParticleSystem& system,
     WorldParticleGroup* group = emitter.particleGroup;
     if (group && group->occupied && group->generation == emitter.particleGroupGeneration &&
         group->emitter == &emitter && group->car == car) return group;
-    for (size_t index = 0; index < system.groupCapacity; ++index) {
-        group = &system.groupStorage[index];
-        if (group->occupied) continue;
+    size_t slot = system.nextGroupSlot;
+    const size_t used = size_t(system.groupCount) +
+        (system.sharedPoolPeer ? system.sharedPoolPeer->groupCount : 0);
+    for (size_t scanned = 0; used < system.groupCapacity && scanned < system.groupCapacity; ++scanned) {
+        if (slot == system.groupCapacity) slot = 0;
+        group = &system.groupStorage[slot];
+        if (group->occupied) { ++slot; continue; }
+        system.nextGroupSlot = slot + 1;
         *group = {};
         group->definition = emitter.particleDefinition;
         group->emitter = &emitter;
@@ -157,14 +162,32 @@ WorldParticleGroup* acquireParticleGroup(WorldParticleSystem& system,
         ++system.groupCount;
         return group;
     }
+    // A shared terrain emitter may alternate between cars. When the pool
+    // fills, its earlier group for this car can still take these particles.
+    for (group = system.lastGroup; group; group = group->previous) {
+        if (group->emitter == &emitter && group->car == car &&
+            group->definition == emitter.particleDefinition) {
+            emitter.particleGroup = group;
+            emitter.particleGroupGeneration = group->generation;
+            return group;
+        }
+    }
+    ++system.droppedGroups;
+    system.lastDroppedGroupEffect = emitter.particleDefinition->key;
+    system.lastDroppedGroupCar = car && car->bindings.owner ? car->bindings.owner->tableIndex : -1;
     return nullptr;
 }
 
 WorldParticle* acquireParticle(WorldParticleSystem& system, WorldParticleGroup& group)
 {
-    for (size_t index = 0; index < system.particleCapacity; ++index) {
-        WorldParticle* particle = &system.particleStorage[index];
-        if (particle->occupied) continue;
+    size_t slot = system.nextParticleSlot;
+    const size_t used = size_t(system.particleCount) +
+        (system.sharedPoolPeer ? system.sharedPoolPeer->particleCount : 0);
+    for (size_t scanned = 0; used < system.particleCapacity && scanned < system.particleCapacity; ++scanned) {
+        if (slot == system.particleCapacity) slot = 0;
+        WorldParticle* particle = &system.particleStorage[slot];
+        if (particle->occupied) { ++slot; continue; }
+        system.nextParticleSlot = slot + 1;
         *particle = {};
         particle->occupied = 1;
         particle->previous = group.last;
@@ -175,6 +198,9 @@ WorldParticle* acquireParticle(WorldParticleSystem& system, WorldParticleGroup& 
         return particle;
     }
     ++system.droppedParticles;
+    system.lastDroppedParticleEffect = group.definition->key;
+    system.lastDroppedParticleCar = group.car && group.car->bindings.owner ?
+        group.car->bindings.owner->tableIndex : -1;
     return nullptr;
 }
 
@@ -233,7 +259,11 @@ WorldServicesResult worldParticlesTriggerEmitter(WorldParticleSystem* system,
     if (emitter->randomState == 0)
         emitter->randomState = static_cast<uint32_t>(convertFloatToInt32(
             particleRandomUnit(*system->randomState) * 2147483648.0f));
-    if (!interested || (emitter->emissionState != 1 && !(elapsed < 0.0f)))
+    if (!interested) {
+        ++system->outOfInterestEmissions;
+        return WORLD_SERVICES_OK;
+    }
+    if (emitter->emissionState != 1 && !(elapsed < 0.0f))
         return WORLD_SERVICES_OK;
     float duration = elapsed;
     if (duration >= 0.0f) {
@@ -871,6 +901,9 @@ static bool canRecordRequests(const ChopperMunitionEffects* effects, size_t coun
 static ChopperEffectRequest* appendRequest(ChopperMunitionEffects* effects, ChopperEffectInstance* instance,
     ChopperEffectRequestKind kind)
 {
+    // The native bound particle backend emits immediately. It has no async
+    // request queue, so not enqueuing is success, NOT a dropped visual effect.
+    if (effects->particles) return nullptr;
     if (!effects->requests || effects->requestCount >= effects->requestCapacity ||
         effects->nextSequence == UINT64_MAX) {
         ++effects->droppedRequests;
@@ -898,8 +931,6 @@ WorldServicesResult chopperEffectsSpawnGroup(ChopperMunitionEffects* effects,
         if (effects->groups[index].key == groupKey) { group = &effects->groups[index]; break; }
     if (!group || (group->count && !group->members))
         return effects->result = WORLD_SERVICES_INVALID_BINDING;
-    // Never reserve half of an authored explosion group: each member must
-    // belong to the same successfully published detonation.
     for (size_t index = 0; index < group->count; ++index) {
         if (!group->members[index] || group->members[index]->groupKey != groupKey)
             return effects->result = WORLD_SERVICES_INVALID_BINDING;
@@ -924,11 +955,15 @@ WorldServicesResult chopperEffectsSpawnGroup(ChopperMunitionEffects* effects,
                 freeSlots += !effects->instances[index].occupied;
         }
     }
-    if (group->count > freeSlots || !canRecordRequests(effects, group->count) ||
-        group->count > UINT64_MAX - effects->nextGeneration)
+    // PAL MunitionEffectsHandler::AddEffect (1BFB10..1BFB88) skips a
+    // failed emitter allocation and keeps the other authored members.
+    const size_t count = effects->particles ? std::min(group->count, freeSlots) : group->count;
+    if (count > freeSlots || !canRecordRequests(effects, count) ||
+        count > UINT64_MAX - effects->nextGeneration)
         return effects->result = WORLD_SERVICES_CAPACITY;
+    effects->droppedAutoEmitters += group->count - count;
     size_t slot = 0;
-    for (size_t index = 0; index < group->count; ++index) {
+    for (size_t index = 0; index < count; ++index) {
         while (effects->instances[slot].occupied) ++slot;
         ChopperEffectInstance* instance = &effects->instances[slot++];
         memset(instance, 0, sizeof(*instance));
@@ -1125,10 +1160,12 @@ WorldServicesResult chopperEffectsEmit(ChopperMunitionEffects* effects,
 namespace hp2 {
 
 struct AcidFXRuntime::Storage {
-    std::array<WorldParticle,1000> particles{};
-    std::array<WorldParticleGroup,400> groups{};
-    std::array<ChopperEffectInstance,600> emitters{};
+    // R104 PC capacity, shared by the world and frame effect systems.
+    std::array<WorldParticle,2400> particles{};
+    std::array<WorldParticleGroup,600> groups{};
+    std::array<ChopperEffectInstance,1024> emitters{};
     std::uint32_t randomState=0x23985727u;
+    std::uint64_t droppedFrameEmitters{};
     WorldParticleSystem system{};
     WorldParticleSystem frameSystem{};
     ChopperMunitionEffects handler{};
@@ -1146,6 +1183,8 @@ AcidFXRuntime::AcidFXRuntime(const CarCinematicServices& cameras)
     // are separate. No effect has been published during either initializer.
     worldParticlesInitialize(&state.frameSystem,state.particles.data(),state.particles.size(),
         state.groups.data(),state.groups.size(),&state.randomState,&cameras);
+    state.system.sharedPoolPeer=&state.frameSystem;
+    state.frameSystem.sharedPoolPeer=&state.system;
     chopperEffectsInitialize(&state.handler,state.emitters.data(),state.emitters.size(),
         nullptr,0,nullptr,0);
     Require(chopperEffectsBindParticles(&state.handler,&state.system)==WORLD_SERVICES_OK,
@@ -1172,6 +1211,11 @@ WorldParticleSystem& AcidFXRuntime::FrameParticles() noexcept
     return storage_->frameSystem;
 }
 
+std::uint64_t AcidFXRuntime::FrameEmitterDrops() const noexcept
+{
+    return storage_->droppedFrameEmitters;
+}
+
 void AcidFXRuntime::BindGameFlow(const std::int32_t& state) noexcept
 {
     storage_->system.gameFlowState=&state;
@@ -1194,6 +1238,7 @@ ChopperEffectInstance* AcidFXRuntime::CreateFrameEmitter(std::uint32_t key,const
         }
         return &emitter;
     }
+    ++state.droppedFrameEmitters;
     return nullptr; // Original fixed afx emitter pool may be exhausted.
 }
 
@@ -1487,19 +1532,20 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
     const auto* projection=view.matrices.clipToScreen;
     Require(projection[0]!=0.0f && projection[5]!=0.0f,
         "Particle projection has no native pixel scale");
-    // Reuse one producer buffer across groups. AttachParticleGroup copies
-    // directly into the frame's contiguous native storage before it clears.
-    std::vector<EcstasyParticleQuad> quads;
-    for(const auto* group=system.firstGroup;group;group=group->next) {
+    const auto resolveGroup=[&](const WorldParticleGroup* group) -> const EditorMarkerTexture* {
         ++result.groups;
         Require(group->occupied && group->definition,"Particle list contains a retired definition/group");
-        if(!particleCarVisible(*group,view)) {++result.hiddenCarGroups;continue;}
-        const auto& definition=*group->definition;
-        const auto* descriptor=catalogue.Texture(definition);
-        if(!descriptor) {++result.missingTextures;continue;}
-        if(system.renderSelectedOnly && system.selectedEmitter && group->emitter!=system.selectedEmitter)continue;
+        if(!particleCarVisible(*group,view)) {++result.hiddenCarGroups;return nullptr;}
+        const auto* descriptor=catalogue.Texture(*group->definition);
+        if(!descriptor) {++result.missingTextures;return nullptr;}
+        if(system.renderSelectedOnly && system.selectedEmitter && group->emitter!=system.selectedEmitter)return nullptr;
         const auto* texture=textureInfoForDescriptor(descriptor);
         Require(texture && texture->pixels.Data(),"Particle definition points to an unretained texture");
+        return descriptor;
+    };
+    const auto projectGroup=[&](const WorldParticleGroup& group,std::vector<EcstasyParticleQuad>& quads,
+        WorldParticleRenderSummary& stats) {
+        const auto& definition=*group.definition;
         const auto widthPower=static_cast<std::uint8_t>(definition.atlasWidthPower);
         const auto heightPower=static_cast<std::uint8_t>(definition.atlasHeightPower);
         Require(definition.atlasWidthPower>=0 && definition.atlasHeightPower>=0 &&
@@ -1511,25 +1557,29 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
         const float maximum=sourceMaximum*particlePixelScale;
         quads.clear();
         float depthSum=0.0f;
-        for(const auto* particle=group->first;particle;particle=particle->next) {
-            ++result.particles;
+        for(const auto* particle=group.first;particle;particle=particle->next) {
+            ++stats.particles;
             if(!particle->occupied)throw std::runtime_error("Particle list contains a retired particle");
             const float age=1.0f-(static_cast<float>(particle->remainingTicks)*0.0009765625f)*inverseLifetime;
             const float point[4]={particle->position[0],particle->position[1],particle->position[2],1.0f};
-            if(eGetClipFlags(point,view.matrices.worldToClip)) {++result.centerClipped;continue;}
-            float camera[4],clip[4],size[4];
-            eMulVector4(camera,view.matrices.worldToView,point);
+            float clip[4];
             eMulVector4(clip,view.matrices.worldToClip,point);
+            if(!(clip[3]>0.0f) || !std::isfinite(clip[3]) || std::fabs(clip[2])>clip[3]) {
+                ++stats.centerClipped;continue;
+            }
+            const bool centerOutside=std::fabs(clip[0])>clip[3] || std::fabs(clip[1])>clip[3];
+            if(centerOutside && !nativeRaster) {++stats.centerClipped;continue;}
+            float camera[4],size[4];
+            eMulVector4(camera,view.matrices.worldToView,point);
             worldParticleHermiteEvaluate(size,definition.sizeRotationCurve,age);
             float pixels=size[0]>0.0f ? (size[0]*view.pixelScale)/camera[2]:0.0f;
             if(maximum<pixels)pixels=maximum;
-            if(!(pixels>1.0f)) {++result.sizeClipped;continue;}
-            if(!(camera[2]<definition.interestDistance)) {++result.distanceClipped;continue;}
+            if(!(pixels>1.0f)) {++stats.sizeClipped;continue;}
+            if(!(camera[2]<definition.interestDistance)) {++stats.distanceClipped;continue;}
             const auto delta=static_cast<std::uint16_t>(convertFloatToInt32(size[1]));
             const auto rotation=static_cast<std::uint16_t>((particle->rotation&1u) ?
                 particle->rotation-delta:particle->rotation+delta);
             EcstasyParticleQuad quad;
-            Require(std::isfinite(clip[3]) && clip[3]>0.0f,"Particle clip divisor is invalid");
             const float z=clip[2]/clip[3];
             const float divisor=projection[11]*z+projection[15];
             Require(std::isfinite(divisor) && divisor!=0.0f,"Particle screen divisor is invalid");
@@ -1559,6 +1609,17 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
                     quad.clipXY[i][1]=(std::floor(rotatedY*7.0f+centerY*16.0f)*(1.0f/16.0f))/scaleY;
                 }
             }
+            // PAL tests only the center. In the PC viewport Vulkan can clip
+            // a submitted quad while keeping the portion still on screen.
+            if(centerOutside) {
+                bool outside=false;
+                for(std::size_t axis=0;axis<2;++axis) {
+                    const auto [first,last]=std::minmax_element(quad.clipXY.begin(),quad.clipXY.end(),
+                        [axis](const auto& a,const auto& b) {return a[axis]<b[axis];});
+                    outside=outside || (*first)[axis]>1.0f || (*last)[axis]<-1.0f;
+                }
+                if(outside) {++stats.centerClipped;continue;}
+            }
             float color[4];worldParticleHermiteEvaluate(color,definition.colorCurve,age);
             for(std::size_t lane=0;lane<4;++lane) {
                 if(!std::isfinite(color[lane]))throw std::runtime_error("Particle curve produced a nonfinite color");
@@ -1569,10 +1630,61 @@ WorldParticleRenderSummary RenderWorldParticles(const WorldParticleSystem& syste
             const float v=static_cast<float>((particle->atlasFrame>>widthPower)&(height-1u))*dv;
             quad.uv={{{u,v},{u+du,v},{u,v+dv},{u+du,v+dv}}};
             depthSum=depthSum+static_cast<float>(convertFloatToInt32(camera[2]));
-            quads.push_back(quad);++result.drawnParticles;
+            quads.push_back(quad);++stats.drawnParticles;
         }
-        if(!quads.empty()) {
-            frame.AttachParticleGroup(quads,*descriptor,view,depthSum/static_cast<float>(quads.size()));
+        return quads.empty() ? 0.0f:depthSum/static_cast<float>(quads.size());
+    };
+
+    // Projection uses only immutable simulation and camera inputs. The
+    // owner resolves textures before dispatch and submits results in the
+    // original group order, including equal-depth ties and alpha IDs.
+    constexpr std::uint32_t particlesPerWorker=256;
+    const auto workers=1u+system.particleCount/particlesPerWorker;
+    if(workers>=2 && system.groupCount>=8 && NativeSceneEffectiveHardwareConcurrency()>1) {
+        struct ProjectedGroup {
+            std::vector<EcstasyParticleQuad> quads;
+            WorldParticleRenderSummary stats;
+            float depth{};
+        };
+        struct GroupInput {
+            const WorldParticleGroup* group;
+            const EditorMarkerTexture* descriptor;
+        };
+        std::vector<GroupInput> inputs;
+        inputs.reserve(system.groupCount);
+        for(const auto* group=system.firstGroup;group;group=group->next) {
+            if(const auto* descriptor=resolveGroup(group))inputs.push_back({group,descriptor});
+        }
+        // Slots own only projected values. Retain their capacity between
+        // views so large smoke bursts do not allocate a vector per group
+        // every frame. Each worker exclusively writes its indexed slot.
+        static thread_local std::vector<ProjectedGroup> scratch;
+        auto& projected=scratch;
+        if(projected.size()<inputs.size())projected.resize(inputs.size());
+        RunNativeSceneJobs(inputs.size(),[&](std::size_t index) {
+            auto& output=projected[index];
+            output.stats={};
+            output.depth=projectGroup(*inputs[index].group,output.quads,output.stats);
+        },8,workers);
+        for(std::size_t index=0;index<inputs.size();++index) {
+            const auto& output=projected[index];
+            result.particles+=output.stats.particles;
+            result.drawnParticles+=output.stats.drawnParticles;
+            result.centerClipped+=output.stats.centerClipped;
+            result.sizeClipped+=output.stats.sizeClipped;
+            result.distanceClipped+=output.stats.distanceClipped;
+            if(output.quads.empty())continue;
+            frame.AttachParticleGroup(output.quads,*inputs[index].descriptor,view,output.depth);
+            ++result.drawnGroups;
+        }
+    } else {
+        std::vector<EcstasyParticleQuad> quads;
+        for(const auto* group=system.firstGroup;group;group=group->next) {
+            const auto* descriptor=resolveGroup(group);
+            if(!descriptor)continue;
+            const auto depth=projectGroup(*group,quads,result);
+            if(quads.empty())continue;
+            frame.AttachParticleGroup(quads,*descriptor,view,depth);
             ++result.drawnGroups;
         }
     }

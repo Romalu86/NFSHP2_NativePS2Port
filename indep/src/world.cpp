@@ -895,6 +895,7 @@ World::World(const hp2::WorldConstructionBindings& b):World()
         storage->physics.stepContext=&storage->physicsStep;
         storage->frame=*b.cars->frame;storage->driver=*b.cars->driver;storage->render=*b.cars->render;
         storage->movement.pursuit=storage->pursuit?storage->pursuit->collision:nullptr;
+        storage->physics.recovery={b.parameters,storage->pursuit.get()};
         storage->physics.wheelTrails=&storage->skids->Trails();
         // Copy the borrow, not the countdown value: Car owns a copied
         // environment, while Race remains the sole owner of its live stage.

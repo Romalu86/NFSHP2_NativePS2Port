@@ -77,7 +77,7 @@ void FlailerAnimatedBlurb::Animate()
     secondAlpha_.SetAlphaScale(0.0f);
     if (!textInstalled_) {
         ui_.resources->SetLanguageID(screenKey_,textKey_,0);
-        ui_.resources->Printf(screenKey_,textKey_,"%s",text_.data());
+        ui_.resources->SetLocalizedText(screenKey_,textKey_,text_.data());
         slide_.SetupToAnimate(650.0f,destination_);
         textInstalled_=true;
     } else if (slide_.position.mode!=0) {

@@ -88,6 +88,9 @@ void gameInputRouterInitialize(GameInputRouter* router,GameInputRegistration* st
         }
         router->monitoredTypes[port]=255;
         router->userConfigurations[port]=0;
+        router->keyboardDrivingLayout[port]=router->nativeHostInput[port]=0;
+        router->nativeMenuInput[port]=router->nativeLayoutChanged[port]=0;
+        router->nativeScannerEpoch[port]=nativeInputResetEpoch[port];
         router->pendingMotorDirty[port]=0;
         for (auto& byte:router->pendingMotorBytes[port])byte=0;
         router->forceWheels[port]={-1,0,0};
@@ -336,18 +339,64 @@ GameInputResult joystickTypeChanged(GameInputRouter* router,int32_t port,uint8_t
 }
 void joystickSetUserConfiguration(GameInputRouter* router,int32_t port,int32_t configuration)
 {
-    if (InputPort(router,port))router->userConfigurations[port]=configuration;
+    if(!InputPort(router,port) || router->userConfigurations[port]==configuration)return;
+    router->userConfigurations[port]=configuration;
+    router->nativeLayoutChanged[port]=1;
+    for(std::size_t i=0;i<router->count;++i) {
+        auto& node=router->registrations[i];
+        if(ScannerPort(node)==port && node.event>92 && !NativeDebugTarget(node))ConnectScanner(*router,node);
+    }
 }
 int32_t joystickGetUserConfiguration(const GameInputRouter* router,int32_t port)
 {
-    return InputPort(router,port)?router->userConfigurations[port]:0;
+    if(!InputPort(router,port))return 0;
+    const auto chosen=router->userConfigurations[port];
+    return !chosen && router->nativeHostInput[port]?JOYSTICK_LAYOUT_E:chosen;
 }
 
 // Final PAL only:230 ScannerConfig lookup rows at2DC500 and7 type tables at2DE558.
 namespace {
-enum class ScannerKind { None,TypeChanged,AnyButton,DigitalDown,DigitalUpOrDown,DoublePress,Repeat,DigitalSteer,DigitalAnalog,Analog };
+enum class ScannerKind { None,TypeChanged,AnyButton,DigitalDown,DigitalUpOrDown,DoublePress,Repeat,DigitalSteer,DigitalAnalog,Analog,Trigger };
 struct ButtonMapping { int8_t configurations[8]; int32_t event; uint32_t button,shift; const char* name; ScannerKind scanner; uint8_t fields[8]; };
+constexpr int8_t layoutE=JOYSTICK_LAYOUT_E,layoutF=JOYSTICK_LAYOUT_F,layoutG=JOYSTICK_LAYOUT_G,layoutH=JOYSTICK_LAYOUT_H;
+// Layouts E-H follow Silent's Trigger control mappings in the frontend donor.
+// Use the original direct pedal events for native analog pressure. The face
+// button pressure event applies a fourfold multiplier on gamepads.
+constexpr int32_t directThrottle=0x71,directBrake=0x74;
+constexpr ButtonMapping triggerThrottle(int32_t event,bool brake,bool withLookback)
+{
+    return {{withLookback?layoutH:layoutE,withLookback?int8_t{0}:layoutF,withLookback?int8_t{0}:layoutG},
+        event,brake?140u:141u,0,brake?"L2":"R2",ScannerKind::Trigger,
+        {0,0,brake?uint8_t{144}:uint8_t{152},withLookback?uint8_t{29}:uint8_t{28}}};
+}
 constexpr ButtonMapping buttonMappings[]{
+    triggerThrottle(directThrottle,false,false),triggerThrottle(directThrottle,false,true),
+    triggerThrottle(directBrake,true,false),triggerThrottle(directBrake,true,true),
+    {{layoutE,layoutG},122,137,0,"CIRCLE",ScannerKind::Analog,{1,0,104,0,0,0,0,0}},
+    {{layoutF},122,139,0,"R1",ScannerKind::Analog,{1,0,136,28,0,0,0,1}},
+    {{layoutH},122,134,0,"CROSS",ScannerKind::Analog,{1,0,112,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},111,0,0,nullptr,ScannerKind::None,{0,0,0,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG,layoutH},112,148,0,"ANALOGL",ScannerKind::Analog,{1,0,48,0,0,1,0,0}},
+    {{layoutE,layoutF,layoutG},115,150,0,"ANALOGR",ScannerKind::Analog,{1,0,40,0,1,3,0,0}},
+    {{layoutE,layoutF,layoutG},118,151,0,"ANALOGR",ScannerKind::Analog,{1,0,40,0,2,2,0,0}},
+    {{layoutE,layoutF,layoutG},123,141,135,"TRIANGLE + R2",ScannerKind::DigitalDown,{1,1,25,28,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},124,140,135,"TRIANGLE + L2",ScannerKind::DigitalDown,{1,1,24,28,0,0,0,0}},
+    {{layoutH},123,151,0,"RIGHT STICK DOWN",ScannerKind::DigitalAnalog,{0,0,40,0,2,0,0,0}},
+    {{layoutH},124,150,0,"RIGHT STICK UP",ScannerKind::DigitalAnalog,{0,0,40,0,1,0,0,0}},
+    {{layoutE,layoutF,layoutG},94,138,0,"L1",ScannerKind::DigitalUpOrDown,{1,0,26,28,0,0,0,0}},
+    {{layoutH},94,135,0,"TRIANGLE",ScannerKind::DigitalUpOrDown,{1,0,28,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},93,135,0,"TRIANGLE",ScannerKind::DigitalDown,{0,0,28,0,0,0,0,0}},
+    {{layoutH},93,137,0,"CIRCLE",ScannerKind::DigitalDown,{0,0,29,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},95,132,0,"LEFT",ScannerKind::DigitalDown,{1,0,23,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},96,133,0,"RIGHT",ScannerKind::DigitalDown,{1,0,21,0,0,0,0,0}},
+    {{layoutH},95,140,137,"CIRCLE + L2",ScannerKind::DigitalDown,{1,1,24,29,0,0,0,0}},
+    {{layoutH},96,141,137,"CIRCLE + R2",ScannerKind::DigitalDown,{1,1,25,29,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},129,132,0,"LEFT",ScannerKind::DigitalDown,{1,0,23,0,0,0,0,0}},
+    {{layoutE,layoutF,layoutG},128,133,0,"RIGHT",ScannerKind::DigitalDown,{1,0,21,0,0,0,0,0}},
+    {{layoutH},129,140,137,"CIRCLE + L2",ScannerKind::DigitalDown,{1,1,24,29,0,0,0,0}},
+    {{layoutH},128,141,137,"CIRCLE + R2",ScannerKind::DigitalDown,{1,1,25,29,0,0,0,0}},
+    {{layoutE,layoutF,layoutG,layoutH},127,143,0,"R3",ScannerKind::DigitalDown,{1,0,18,0,0,0,0,0}},
+    {{layoutH},130,136,0,"SQUARE",ScannerKind::DigitalDown,{1,0,31,0,0,0,0,0}},
     {{-1,0,0,0,0,0,0,0},1,0,0,nullptr,ScannerKind::TypeChanged,{0,0,0,0,0,0,0,0}},
     {{-1,0,0,0,0,0,0,0},2,0,0,"START + SELECT",ScannerKind::DigitalDown,{1,1,19,16,0,0,1,0}},
     {{-1,0,0,0,0,0,0,0},3,0,0,nullptr,ScannerKind::Repeat,{1,0,20,0,0,0,1,0}},
@@ -584,7 +633,7 @@ constexpr DeviceConfigurations deviceConfigurations[]{
     {65,{10,11,12,13,0,0,0,0,0,0},{0,0,0,0,0,0}},
     {83,{20,21,22,23,0,0,0,0,0,0},{4,20,12,20,12,20}},
     {115,{20,21,22,23,0,0,0,0,0,0},{4,20,12,20,12,20}},
-    {121,{30,31,32,33,0,0,0,0,0,0},{4,20,12,20,12,20}},
+    {121,{30,31,32,33,layoutE,layoutF,layoutG,layoutH,0,0},{4,20,12,20,12,20}},
     {35,{40,0,0,0,0,0,0,0,0,0},{4,8,12,8,12,8}},
     {21,{50,0,0,0,0,0,0,0,0,0},{2,0,12,8,12,8}},
     {22,{51,0,0,0,0,0,0,0,0,0},{2,0,12,8,12,8}},
@@ -651,8 +700,11 @@ namespace {
 void ConnectScanner(GameInputRouter& router,GameInputRegistration& node)
 {
     const auto port=ScannerPort(node);
-    const auto* configuration=FindScannerConfig(node.event,
-        router.scanners[port].currentType,router.userConfigurations[port]);
+    const bool fixedLayout=router.keyboardDrivingLayout[port] ||
+        (router.nativeMenuInput[port] && node.target.kind==GAME_INPUT_FRONTEND) ||
+        (applicationDebugToolsEnabled && NativeDebugTarget(node));
+    const auto* configuration=FindScannerConfig(node.event,router.scanners[port].currentType,
+        fixedLayout?0:joystickGetUserConfiguration(&router,port));
     node.scannerConfiguration=configuration?static_cast<int32_t>(configuration-buttonMappings):-1;
     node.scannerValue=0;node.scannerInitial=1;
 }
@@ -789,6 +841,14 @@ uint16_t ScanEvent(GameInputRegistration& node,GameInputPortScanner& port,
         }
         return 0;
     }
+    case ScannerKind::Trigger: {
+        // Native trigger pressure is unipolar. The stick's center deadzone
+        // and hysteresis would flatten part of the pedal's physical range.
+        const auto value=PadBits(current,f[3],0,1)?PadBits(current,f[2],0,255):0u;
+        if(!node.scannerInitial && node.scannerValue==value)return 0;
+        node.scannerInitial=0;node.scannerValue=value;
+        return PackedEvent(node,value);
+    }
     case ScannerKind::Analog: {
         hp2::Require(f[5]<4,"Joystick scanner has an invalid final calibration axis");
         const auto& calibration=port.calibration[f[5]];
@@ -797,8 +857,12 @@ uint16_t ScanEvent(GameInputRegistration& node,GameInputPortScanner& port,
             static_cast<float>(PadBits(current,f[2],f[0],255)))));
         if (f[4]==1) {value=value<127?(127-value)*2:0;if (value==254)value=255;}
         else if (f[4]==2) {value=value>128?(value-128)*2:0;if (value==254)value=255;}
+        // Layout H can reuse the triggers for the side views. Release the
+        // driving action as soon as its modifier takes ownership.
+        const bool modifierBlocks=f[3] && !PadBits(current,f[3],f[1],1);
+        if(f[7] && modifierBlocks)value=0;
         if (node.scannerInitial) {node.scannerInitial=0;node.scannerValue=value;return PackedEvent(node,value);}
-        if (f[3] && !PadBits(current,f[3],f[1],1))return 0;
+        if (!f[7] && modifierBlocks)return 0;
         const auto hysteresis=value==0 || value==128 || value==255?0:calibration.hysteresis;
         if (value+hysteresis<node.scannerValue || node.scannerValue+hysteresis<value) {
             node.scannerValue=value;return PackedEvent(node,value);
@@ -878,10 +942,12 @@ void NeutralNativeControls(JoystickControls& output,const JoystickControls& sour
 }
 bool NativeControlsNeutral(const JoystickControls* sample,int32_t type)
 {
-    if(type<0 || sample->held!=0)return false;
+    if(type<0 || sample->held!=0 || (sample->nativeDebugInput && sample->nativeDebugHeld))return false;
     // Release gating uses the native stick center, allowing tiny residual
     // noise within the original scanner deadzone. Triggers are buttons.
     for(const auto value:sample->sticks)if(value<112 || value>144)return false;
+    if(sample->nativeDebugInput)
+        for(const auto value:sample->nativeDebugSticks)if(value<112 || value>144)return false;
     return true;
 }
 void NativeDebugSample(GameInputRouter& input,int32_t type,const JoystickControls* raw,
@@ -914,8 +980,10 @@ void NativeDebugSample(GameInputRouter& input,int32_t type,const JoystickControl
     }
     if(!eligible) {focus.startPending=0;focus.chordLatched=0;return;}
     constexpr uint16_t start=uint16_t{1}<<3,select=uint16_t{1};
-    const bool startDown=(raw->held&start)!=0,selectDown=(raw->held&select)!=0;
-    const bool oldStartDown=(oldRaw->held&start)!=0,oldSelectDown=(oldRaw->held&select)!=0;
+    const auto debugHeld=raw->nativeDebugInput?raw->nativeDebugHeld:raw->held;
+    const auto oldDebugHeld=oldRaw->nativeDebugInput?oldRaw->nativeDebugHeld:oldRaw->held;
+    const bool startDown=(debugHeld&start)!=0,selectDown=(debugHeld&select)!=0;
+    const bool oldStartDown=(oldDebugHeld&start)!=0,oldSelectDown=(oldDebugHeld&select)!=0;
     bool startPulse=false;
     if(startDown && !oldStartDown)focus.startPending=1;
     if(startDown && selectDown && !oldSelectDown && focus.startPending && !focus.chordLatched) {
@@ -931,9 +999,13 @@ void NativeDebugSample(GameInputRouter& input,int32_t type,const JoystickControl
     if(!startDown && focus.startPending) {focus.startPending=0;startPulse=true;}
     if(focus.active) {
         NeutralNativeControls(normal,*raw);tools=*raw;
+        tools.held=debugHeld;
+        if(raw->nativeDebugInput)std::copy_n(raw->nativeDebugSticks,4,tools.sticks);
         tools.held&=static_cast<uint16_t>(~start);
         if(startPulse)tools.held|=start;
-        nativeDebugCaption="DEBUG CAMERA - Back: next view; hold Start then Back: drive";
+        nativeDebugCaption=raw->keyboardDrivingLayout?
+            "DEBUG CAMERA - Backspace: next view / Esc + Backspace: drive":
+            "DEBUG CAMERA - Back: next view / Start + Back: drive";
     } else {
         // Delay standalone Start until release only in the opted-in live
         // single-player context. It still reaches the real Pause callback.
@@ -966,17 +1038,43 @@ int GenerateFromScanners(GameInputRouter& input,int32_t port,int32_t type,
     const JoystickControls* debugCurrent=nullptr,const JoystickControls* debugPrevious=nullptr)
 {
     auto& scanner=input.scanners[port];
+    const bool layoutChanged=input.keyboardDrivingLayout[port]!=current->keyboardDrivingLayout;
+    const bool nativeSourceChanged=current->nativeHostInput &&
+        (layoutChanged || input.nativeLayoutChanged[port] || !input.nativeHostInput[port] ||
+            input.nativeMenuInput[port]!=current->nativeMenuInput ||
+            input.nativeScannerEpoch[port]!=nativeInputResetEpoch[port]);
+    input.keyboardDrivingLayout[port]=current->keyboardDrivingLayout;
+    input.nativeHostInput[port]=current->nativeHostInput;
+    input.nativeMenuInput[port]=current->nativeMenuInput;
+    if(nativeSourceChanged) {
+        input.nativeLayoutChanged[port]=0;
+        input.nativeScannerEpoch[port]=nativeInputResetEpoch[port];
+        // Clear the old scheme's continuous channels through the same queue
+        // recorded by Joylog, including channels absent from the new scheme.
+        for(size_t i=0;i<input.count;++i) {
+            const auto& node=input.registrations[i];
+            if(node.device==port && node.target.kind==GAME_INPUT_REAL_DRIVER &&
+                node.event>=0x6f && node.event<=0x7a)
+                AddQueuedEvent(input,port,PackedEvent(node,node.event<=0x70?128:0),node);
+        }
+    }
     if (type!=scanner.currentType) {
         if (type!=scanner.pendingType) {scanner.pendingType=type;scanner.stableSamples=0;return 0;}
         if (++scanner.stableSamples<32)return 0;
         scanner.currentType=type;
         for (int axis=0;axis<4;++axis)ChooseResponse(scanner.calibration[axis],type,axis);
         for (size_t i=0;i<input.count;++i)if (ScannerPort(input.registrations[i])==port)ConnectScanner(input,input.registrations[i]);
+    } else if(layoutChanged || nativeSourceChanged) {
+        for(size_t i=0;i<input.count;++i)
+            if(ScannerPort(input.registrations[i])==port &&
+                (input.registrations[i].event>92 || input.registrations[i].target.kind==GAME_INPUT_FRONTEND))
+                ConnectScanner(input,input.registrations[i]);
     }
     int generated=0;
     for (size_t i=0;i<input.count;++i) {
         auto& node=input.registrations[i];
         if (ScannerPort(node)!=port || node.scannerConfiguration<0)continue;
+        if(current->nativeMenuInput && node.target.kind==GAME_INPUT_REAL_DRIVER)continue;
         const auto& config=buttonMappings[node.scannerConfiguration];
         if (replay && replay->restoring && !config.fields[6])continue;
         const bool debug=applicationDebugToolsEnabled && NativeDebugTarget(node) && debugCurrent && debugPrevious;

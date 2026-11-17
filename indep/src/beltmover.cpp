@@ -9,6 +9,7 @@
 #include "indep/inc/World.hpp"
 
 #include <math.h>
+#include <cmath>
 #include <string.h>
 
 static float dot3(const float first[4],const float second[4])
@@ -80,6 +81,25 @@ float beltMoverRelativePosition(BeltMover* mover,const float position[4],float p
     return dot3(difference,tangent);
 }
 
+// Convert at the current Catmull-Rom derivative. The average count/length
+// scale remains part of the original BeltMover snapshot.
+float beltMoverWorldSpeedToParameter(float worldSpeed,const float tangent[4])
+{
+    const float squared = dot3(tangent,tangent);
+    if (!std::isfinite(worldSpeed) || !(squared > 0.00000001f) || !std::isfinite(squared))
+        return 0.0f;
+    const float converted = bScalarFiniteRatio(worldSpeed,bScalarSquareRoot(squared));
+    return std::isfinite(converted) ? converted : 0.0f;
+}
+
+static float beltMoverStartSpeed(BeltMover* mover)
+{
+    if (mover->path.count < 2) return 0.0f;
+    float tangent[4];
+    quickSplineEvaluate(&mover->path,tangent,mover->startParameter,1);
+    return bScalarMultiply(mover->velocityParameter,bScalarSquareRoot(dot3(tangent,tangent)));
+}
+
 float beltMoverSlope(BeltMover* mover)
 {
     if (mover->path.count == 0) return 0.0f;
@@ -92,7 +112,7 @@ float beltMoverSlope(BeltMover* mover)
 float beltMoverAvailableAcceleration(BeltMover* mover)
 {
     return driverAvailableAcceleration(mover->movement->bindings.belt->vehicle,
-                                        bScalarFiniteRatio(mover->velocityParameter,mover->parameterScale));
+                                        beltMoverStartSpeed(mover));
 }
 
 void beltMoverRecalculate(BeltMover* mover)
@@ -106,18 +126,21 @@ void beltMoverRecalculate(BeltMover* mover)
     const float closest = quickSplineFindClosestParameter(&mover->path,state->position,(float)first,0.004999999888241291f);
     float difference[4],tangent[4];
     (void)beltMoverRelativePosition(mover,state->position,closest,difference,tangent);
-    mover->startParameter = closest;normalize(tangent);
-    mover->velocityParameter = bScalarMultiply(mover->parameterScale,state->speed);
-    const float targetVelocity = bScalarMultiply(mover->parameterScale,*binding->targetSpeed);
+    mover->startParameter = closest;
+    // Use the same local conversion for speed and acceleration limits.
+    mover->velocityParameter = beltMoverWorldSpeedToParameter(state->speed,tangent);
+    const float targetVelocity = beltMoverWorldSpeedToParameter(*binding->targetSpeed,tangent);
     const float change = bScalarAdd(bScalarMultiply(targetVelocity,0.8989999890327454f),-mover->velocityParameter);
     const float duration = *binding->targetDuration > 0.0f ? *binding->targetDuration : 0.5f;
     mover->accelerationParameter = bScalarFiniteRatio(change,duration);
-    const float upper = bScalarMultiply(mover->parameterScale,beltMoverAvailableAcceleration(mover));
+    const float available = beltMoverAvailableAcceleration(mover);
+    const float upper = beltMoverWorldSpeedToParameter(available,tangent);
     if (upper < mover->accelerationParameter) mover->accelerationParameter = upper;
     else {
-        const float lower = bScalarMultiply(mover->parameterScale,-20.0f);
+        const float lower = beltMoverWorldSpeedToParameter(-20.0f,tangent);
         if (mover->accelerationParameter < lower) mover->accelerationParameter = lower;
     }
+    normalize(tangent);
     float perpendicular[4];beltPerpendicular(perpendicular,tangent);
     const float offset = -dot3(difference,perpendicular);
     if (offset != mover->lateralOffset.desiredValue) mover->lateralOffset.mode = 2;
@@ -146,7 +169,7 @@ float beltMoverLateralGrip(BeltMover* mover,float acceleration)
     const PhysicsCarInfo* info = &mover->movement->info;
     const float magnitude = fabsf(acceleration);
     const float sign = bScalarFiniteRatio(acceleration, magnitude);
-    const float speed = bScalarFiniteRatio(mover->velocityParameter, mover->parameterScale);
+    const float speed = beltMoverStartSpeed(mover);
     const float lateralScale = bScalarMultiply((bScalarAdd(info->tires[1].lateralScale, info->tires[0].lateralScale)), 0.5f);
     const float downforce = bScalarMultiply((bScalarAdd(info->aerodynamics->frontDownforce, info->aerodynamics->rearDownforce)), 0.5f);
     const float requestedForce = bScalarMultiply((bScalarMultiply(info->body->mass, magnitude)), lateralScale);
@@ -174,7 +197,7 @@ float beltMoverLateralGrip(BeltMover* mover,float acceleration)
 float beltMoverPredictRoadError(BeltMover* mover,float duration)
 {
     const PhysicsCarInfo* info = &mover->movement->info;
-    const float speed = bScalarFiniteRatio(mover->velocityParameter, mover->parameterScale);
+    const float speed = beltMoverStartSpeed(mover);
     const float downforce = bScalarMultiply((bScalarAdd(info->aerodynamics->frontDownforce, info->aerodynamics->rearDownforce)), 0.5f);
     const float gravity = bScalarAdd(bScalarFiniteRatio(bScalarMultiply(speed, downforce), info->body->mass), 9.800000190734863f);
     float position[4],velocity[4];
@@ -196,6 +219,13 @@ float beltMoverPredictRoadError(BeltMover* mover,float duration)
     return bScalarMultiply(penetration, 0.10000000149011612f);
 }
 
+static void beltMoverTangentAt(BeltMover* mover,float tangent[4],float elapsed)
+{
+    const float speed = bScalarAdd(bScalarMultiply(elapsed,mover->accelerationParameter),mover->velocityParameter);
+    const float parameter = bScalarAdd(bScalarMultiply(elapsed,speed),mover->startParameter);
+    quickSplineEvaluate(&mover->path,tangent,parameter,1);
+}
+
 float beltMoverMove(BeltMover* mover,float elapsed)
 {
     // A native zero-duration capture preserves the current mover state. The
@@ -211,7 +241,10 @@ float beltMoverMove(BeltMover* mover,float elapsed)
     float previousPosition[4];memcpy(previousPosition,state->position,sizeof(previousPosition));
     if (0.0020000000949949026f < beltMoverPredictRoadError(mover,0.5f)) *binding->replanDelayTicks = 2400;
     mover->elapsed = bScalarAdd(mover->elapsed, elapsed);
-    const float speed = bScalarFiniteRatio(bScalarAdd(mover->velocityParameter, bScalarMultiply(mover->accelerationParameter, mover->elapsed)), mover->parameterScale);
+    float tangent[4];
+    beltMoverTangentAt(mover,tangent,mover->elapsed);
+    const float parameterRate = bScalarAdd(mover->velocityParameter,bScalarMultiply(mover->accelerationParameter,mover->elapsed));
+    const float speed = bScalarMultiply(parameterRate,bScalarSquareRoot(dot3(tangent,tangent)));
 
     float velocity[4];beltMoverVelocity(mover,velocity,bScalarAdd(mover->elapsed, 0.5f));
     tCubic2DSetValDesired(&mover->velocityFilter,velocity);tCubic2DUpdate(&mover->velocityFilter,elapsed);
@@ -231,8 +264,9 @@ float beltMoverMove(BeltMover* mover,float elapsed)
     const uint16_t heading = vectorAtan2Angle(velocity[0],velocity[1]);
     const uint16_t previousHeading = state->heading;state->heading = heading;
 
-    beltMoverVelocity(mover,forward,mover->elapsed);
-    beltPerpendicular(perpendicular,forward);normalize(perpendicular);
+    const float derivative = bScalarAdd(bScalarMultiply(bScalarAdd(mover->elapsed,mover->elapsed),mover->accelerationParameter),mover->velocityParameter);
+    for (int axis = 0; axis < 4; ++axis) tangent[axis] = bScalarMultiply(tangent[axis],derivative);
+    beltPerpendicular(perpendicular,tangent);normalize(perpendicular);
     if (-grip != mover->lateralOffset.value) mover->lateralOffset.mode = 2;
     mover->lateralOffset.desiredValue = -grip;
     tCubic1DUpdate(&mover->lateralOffset,elapsed,0.0f,0.0f);
@@ -292,9 +326,8 @@ float* beltMoverPosition(BeltMover* mover,float output[4],float elapsed)
 float* beltMoverVelocity(BeltMover* mover,float output[4],float elapsed)
 {
     const float twiceElapsed = bScalarAdd(elapsed, elapsed);
-    const float parameter = bScalarAdd(bScalarMultiply(elapsed, (bScalarAdd(bScalarMultiply(elapsed, mover->accelerationParameter), mover->velocityParameter))), mover->startParameter);
     const float derivative = bScalarAdd(bScalarMultiply(twiceElapsed, mover->accelerationParameter), mover->velocityParameter);
-    quickSplineEvaluate(&mover->path,output,parameter,1);
+    beltMoverTangentAt(mover,output,elapsed);
     for (int axis = 0; axis < 4; ++axis) output[axis] = bScalarMultiply(output[axis], derivative);
     return output;
 }

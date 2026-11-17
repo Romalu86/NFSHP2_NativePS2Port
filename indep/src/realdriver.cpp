@@ -213,15 +213,13 @@ void realDriverRecoverInput(RealDriver* driver,uint8_t pressed)
 void realDriverNitroInput(RealDriver* driver,uint8_t pressed)
 {
     // PAL13C25C/13C260 reads the same live RaceSettings+274 as the horn.
-    // The explicit PC option admits human racers and playable traffic to
-    // this same request, cooldown and replay guard. Their actual physics,
-    // shared Nitro cues and FX consume it; police keep the pursuit rule.
+    // The PC option extends the request and cooldown to all playable cars,
+    // including police models driven by a player in an ordinary race.
     if(!pressed)return;
     const bool pursuitNitro=driver->configuration->bodyCategory==1&&
         driver->frame->environment.settings->specialPursuit;
-    const bool racerNitro=hp2::applicationNativeGameplay.racerNitro&&
-        (driver->configuration->bodyCategory==0||driver->configuration->bodyCategory==2)&&driver->player;
-    if((pursuitNitro||racerNitro)&&realDriverNitroReady(driver)){
+    const bool playerNitro=hp2::applicationNativeGameplay.racerNitro&&driver->player;
+    if((pursuitNitro||playerNitro)&&realDriverNitroReady(driver)){
         driver->movement->bindings.controls->nitroRequest=1;
         driver->nitroStartedTicks=driver->movement->bindings.environment->clock->worldTimer;
     }
@@ -420,12 +418,14 @@ void realDriverUpdatePedals(RealDriver* driver,float elapsed)
         forward=driver->throttleInput;
     }
     const float reverse=driver->brakeInput;
-    if(0.6000000238418579f<reverse)driver->reverseRequested=1;
+    const bool analogForward=driver->throttleBytes[0]>0 && driver->throttleBytes[0]<255;
+    const bool analogReverse=driver->brakeBytes[0]>0 && driver->brakeBytes[0]<255;
+    if(0.6000000238418579f<reverse || (analogReverse && vehicle->forwardSpeed<=0.0f))driver->reverseRequested=1;
     else if(-2.0f<vehicle->forwardSpeed)driver->reverseRequested=0;
     float brake;
     float throttle;
     float reverseThrottle;
-    if(0.5f<vehicle->forwardSpeed){
+    if((analogReverse?0.02f:0.5f)<vehicle->forwardSpeed){
         brake=reverse;throttle=forward;reverseThrottle=0.0f;
     }else if(vehicle->forwardSpeed<-30.0f||
              (driver->reverseRequested&&vehicle->forwardSpeed<-2.0f)){
@@ -433,17 +433,19 @@ void realDriverUpdatePedals(RealDriver* driver,float elapsed)
     }else{
         brake=0.0f;throttle=forward;reverseThrottle=reverse;
     }
-    reverseThrottle=reverseThrottle+reverseThrottle;
+    if(!analogReverse)reverseThrottle=reverseThrottle+reverseThrottle;
     if(1.0f<reverseThrottle)reverseThrottle=1.0f;
     controls->brake=brake;
     if(0.5f<controls->handbrake&&
        (((uint32_t)driver->movement->bindings.environment->clock->worldLoopCounter+1u)&7u)==0u&&
        10.0f<vehicle->speed&&driver->replay)
         replayManagerAddHighlight(driver->replay,1.0f);
-    if(throttle+0.20000000298023224f<reverseThrottle){
+    if(throttle+(analogReverse?0.0f:0.20000000298023224f)<reverseThrottle){
+        controls->proportionalThrottle=analogReverse;
         controls->throttle=reverseThrottle;
         controls->gearRequest=0;
     }else{
+        controls->proportionalThrottle=analogForward && throttle>0.0f;
         controls->throttle=throttle;
         if(controls->gearRequest==0)realDriverSelectDefaultGear(driver);
     }

@@ -1,5 +1,6 @@
 #include "indep/inc/Pursuit.hpp"
 #include "indep/inc/CarDamage.hpp"
+#include "indep/inc/DemoDisc.hpp"
 #include "indep/inc/CameraMover.hpp"
 #include "indep/inc/Car.hpp"
 #include "indep/inc/Car.hpp"
@@ -92,8 +93,6 @@ float pursuitManagerRadarIntensity(const PursuitManager* manager,const Car* car,
 #include "indep/inc/Replay.hpp"
 #include "indep/inc/Car.hpp"
 #include "indep/inc/CarDriver.hpp"
-
-int32_t pursuitLimitAiPursuitsToOne=0;
 
 // The authored resource, native live blocks and original-index lookup are
 // three views of one catalogue allocation. No copied per-group site arrays.
@@ -781,8 +780,9 @@ WorldServicesResult pursuitManagerCreatePursuit(PursuitManager* manager,
         }else{
             copLimit=1;
             allocationMode=0;
-            permitted=found ? group->activeCount<1 :
-                (pursuitLimitAiPursuitsToOne ? aiGroups==0 : aiGroups<2);
+            // PAL225214 reads the live demo-disc policy.
+            const int32_t aiGroupLimit=TheDemoDiscManager.ActivationWord()!=0 ? 1 : 2;
+            permitted=found ? group->activeCount<1 : aiGroups<aiGroupLimit;
         }
     }
     if(!permitted)return manager->result=WORLD_SERVICES_OK;

@@ -13,13 +13,19 @@ extern "C" {
 #endif
 
 enum { JOYSTICK_PORT_COUNT = 2, JOYSTICK_SAMPLES = 32,
-    JOYSTICK_PROFILE_DISCONNECTED = -1, JOYSTICK_PROFILE_GAMEPAD = 0x79 };
+    JOYSTICK_PROFILE_DISCONNECTED = -1, JOYSTICK_PROFILE_GAMEPAD = 0x79,
+    JOYSTICK_LAYOUT_E=60, JOYSTICK_LAYOUT_F=61, JOYSTICK_LAYOUT_G=62, JOYSTICK_LAYOUT_H=63 };
 
 typedef struct JoystickControls {
     uint16_t held;                 /* One logical bit means pressed. */
     uint8_t sticks[4];             /* Right X/Y, left X/Y; centre 128. */
     uint8_t pressures[12];         /* Authored pressure-channel order. */
     int32_t mappingProfile;        /* Authored scanner profile, or -1. */
+    uint8_t keyboardDrivingLayout; /* Use authored layout A for physical driving keys. */
+    uint16_t nativeDebugHeld;
+    uint8_t nativeDebugSticks[4];
+    uint8_t nativeDebugInput;
+    uint8_t nativeHostInput, nativeMenuInput;
 } JoystickControls;
 
 typedef struct JoystickSample {
@@ -70,7 +76,7 @@ typedef enum CarDriverKind {
 
 typedef struct CarControls {
     uint16_t steeringAngle;
-    uint16_t padding;
+    uint16_t proportionalThrottle; /* Native analog pedal drives the selected gear. */
     float throttle;
     float brake;
     float handbrake;
@@ -379,6 +385,8 @@ typedef struct GameInputRouter {
      * packets. TypeChanged runs before storing the newly observed type. */
     uint8_t monitoredTypes[2];
     int32_t userConfigurations[2];
+    uint8_t keyboardDrivingLayout[2], nativeHostInput[2], nativeMenuInput[2], nativeLayoutChanged[2];
+    uint32_t nativeScannerEpoch[2];
     uint8_t pendingMotorBytes[2][6];
     int32_t pendingMotorDirty[2];
     GameInputForceWheel forceWheels[2];
@@ -520,6 +528,8 @@ const CarDriverCharacter* carDriverCharacterAt(const CarDriverAppearanceCatalogu
 #include <vector>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <optional>
 #include <chrono>
 #include <deque>
 
@@ -555,6 +565,7 @@ enum class NativeDeviceMode : std::uint8_t {
 enum class NativeBindingKind : std::uint8_t {
     None,Button,AxisPositive,AxisNegative,Hat,AxisFullPositive,AxisFullNegative
 };
+enum class NativePromptDevice : std::uint8_t { Original, Keyboard, Xbox, PlayStation };
 struct NativeInputBinding {
     NativeBindingKind kind{NativeBindingKind::None};
     std::int32_t index{};
@@ -577,18 +588,21 @@ struct NativeGamepadProfile {
     std::array<std::int32_t,4> deadzone{{-1,-1,-1,-1}}; // -1 inherits the legacy setting.
     std::array<std::int32_t,4> saturation{{32767,32767,32767,32767}};
     std::int32_t triggerThreshold{-1}; // -1 inherits; otherwise 0..229 in pressure units.
+    bool adaptiveTriggers{}, policeRadioSpeaker{};
+    std::int32_t policeRadioVolume{100};
     std::int32_t vibrationScale{100}; // Percent of game-requested motor strength.
 };
 struct NativeInputSettings {
     std::array<std::uint16_t,20> keys{{
-        0x09,0,'N',0x1b,0x26,0x27,0x28,0x25,
-        'Q','E',0xa0,0x20,'C','H','W','S','A','D',0x0d,0x08}};
+        'R',0,0xa0,0x1b,0x09,0,0,0,
+        'Z','X','Q',0x20,'C','H',0x26,0x28,0x25,0x27,0x0d,0x08}};
     std::array<std::int32_t,2> controller{{0,1}}; // Legacy index only when no stable key is saved.
     std::int32_t leftDeadzone{7849},rightDeadzone{8689},triggerThreshold{};
     bool vibration{true},invertSteering{},invertLookY{},swapSticks{};
+    std::int32_t promptStyle{},steeringSensitivity{100};
+    std::array<std::array<std::uint16_t,2>,2> zoneKeys{{{{'F','G'}},{{0,0}}}};
     std::array<std::uint16_t,20> player2Keys{{
-        0x6d,0,'O',0x6b,0x68,0x66,0x62,0x64,
-        0x67,0x69,0x6f,0x60,0x65,0x6e,'I','K','J','L',0x0d,0x08}};
+        'B',0,0xa2,0,'T',0,0,0,'1','2','E','F','V','G','W','S','A','D',0,0}};
     std::array<NativeDeviceMode,2> deviceMode{{NativeDeviceMode::Automatic,NativeDeviceMode::Automatic}};
     std::array<std::string,2> deviceKey{}; // Persistent GUID+serial/path identity; empty means automatic.
     std::array<NativeGamepadProfile,2> profiles{};
@@ -679,8 +693,13 @@ struct NativeInputDeviceInfo {
     std::int32_t index{-1},instanceId{-1},axes{},buttons{},hats{};
     bool standardized{};
     std::string pathKey; // Unambiguous physical-path alias, also valid when serial alone is unique.
+    bool playStation{}, dualSense{};
 };
-bool NativeKeyboardEnabled(const NativeInputSettings& settings,std::int32_t port) noexcept;
+std::string NativeKeyName(std::uint16_t key);
+ControllerState NativeMenuInputState(const NativeInputSettings& settings,std::int32_t port,
+    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused,bool split=false);
+bool NativeKeyboardEnabled(const NativeInputSettings& settings,std::int32_t port,
+    bool split=false,bool gamepadConnected=false) noexcept;
 bool NativeGamepadEnabled(const NativeInputSettings& settings,std::int32_t port) noexcept;
 const std::array<std::uint16_t,20>& NativeKeyboardBindings(const NativeInputSettings& settings,std::int32_t port);
 bool DetectNativeBinding(const NativePadSample& current,const NativePadSample& baseline,
@@ -709,7 +728,8 @@ void MigrateNativeInputPreferences(NativeInputSettings& settings);
 void AssignNativeKeyboardAndGamepad(NativeInputSettings& settings,std::int32_t gamepad);
 void AssignNativePlayerOneGamepad(NativeInputSettings& settings,std::int32_t gamepad);
 ControllerState NativeInputState(const NativeInputSettings& settings,std::int32_t port,
-    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused);
+    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused,bool drivingKeyboard=false,bool split=false);
+void FilterNativeSharedKeyboardKeys(const NativeInputSettings& settings,std::int32_t port,std::array<bool,256>& keys) noexcept;
 }
 
 namespace hp2 {
@@ -728,6 +748,9 @@ public:
     void PollObservations(std::vector<platform::NativePadObservation>& output);
     void Rumble(const std::string& key,std::int32_t fallbackIndex,std::uint16_t low,std::uint16_t high,bool refresh=true);
     void StopRumble() noexcept;
+    void SetDualSenseTriggers(const std::string& key, std::uint8_t left, std::uint8_t right) noexcept;
+    void StopDualSenseTriggers() noexcept;
+    std::wstring_view DualSenseSpeakerContainer(const std::string& key);
 private:
     struct Storage;
     std::unique_ptr<Storage> storage_;
@@ -740,8 +763,21 @@ public:
     ~WindowsInputDevice();
     WindowsInputDevice(const WindowsInputDevice&)=delete;
     WindowsInputDevice& operator=(const WindowsInputDevice&)=delete;
-    void Poll();
+    void Poll(bool suppressEnter);
     void BeginStep(platform::NativeInputTimeline::Clock::time_point boundary);
+    void SetMenuInput(bool menu,bool pause,bool split) noexcept;
+    void SetReplayInput(bool enabled) noexcept;
+    void UseKeyboardPrompts() noexcept;
+    void SetSettings(const platform::NativeInputSettings& settings);
+    platform::NativePromptDevice PromptDevice() const noexcept;
+    platform::NativePromptDevice GamepadPromptDevice(std::int32_t port) const noexcept;
+    std::string DeviceName(std::int32_t port) const;
+    bool HasDualSense(std::int32_t port) const noexcept;
+    void SetDrivingTriggers(std::int32_t port, std::uint32_t throttle, std::uint32_t brake) noexcept;
+    std::wstring_view DualSenseSpeakerContainer(std::int32_t& volume);
+    void PreviewDualSenseVolume(std::int32_t port,std::optional<std::int32_t> volume) noexcept;
+    void BeginBindingCapture(std::int32_t port) noexcept;
+    std::uint16_t CapturedKey() const noexcept;
     platform::NativeInputTimeline::Clock::time_point MessageTime(std::uint32_t milliseconds) const;
     int32_t ReadInput(int32_t port,JoystickControls& destination);
     void SetRumble(int32_t port,uint8_t small,uint8_t large);

@@ -500,7 +500,6 @@ WorldServicesResult pursuitManagerNextPursuitId(const PursuitManager* manager,in
 WorldServicesResult pursuitGroupDeclareSpeech(PursuitManager* manager,PursuitCollisionGroup* group);
 WorldServicesResult pursuitGroupJoinSpeech(PursuitManager* manager,PursuitCollisionGroup* group);
 /* Independent actual data tuning at PAL2EFFE0, initially zero. */
-extern int32_t pursuitLimitAiPursuitsToOne;
 WorldServicesResult pursuitGroupUpdateDriveTargets(PursuitManager* manager,PursuitCollisionGroup* group);
 WorldServicesResult pursuitManagerChopperAvailable(const PursuitManager* manager,int32_t* available);
 WorldServicesResult pursuitManagerAcquireChopper(PursuitManager* manager,struct Chopper** chopper);

@@ -40,6 +40,7 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int)
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <windowsx.h>
 #include "resources/NativeAppResources.h"
 #endif
 
@@ -218,6 +219,17 @@ void NativeFrameTiming::Reset(Clock::time_point now) noexcept
     *this={};initialized_=true;windowStart_=lastObservation_=now;
 }
 
+std::array<char,48> nativeFrameRateCaption() noexcept
+{
+    std::array<char,48> caption{};
+    if(applicationShowFrameRate) {
+        if(applicationFrameTiming.frameRateAvailable)
+            std::snprintf(caption.data(),caption.size(),"FPS: %.0f",std::round(applicationFrameTiming.framesPerSecond));
+        else std::snprintf(caption.data(),caption.size(),"FPS: --");
+    }
+    return caption;
+}
+
 bool NativeFrameTiming::Observe(Clock::time_point now,
     const EcstasyVulkanFrameStatistics* renderer,double updateMilliseconds) noexcept
 {
@@ -299,7 +311,10 @@ void NativePresentationClock::Presented(Clock::time_point started) noexcept
     const auto rate=static_cast<std::uint32_t>(limit_);
     const std::uint64_t scaled=1000000000ull+remainder_;
     remainder_=static_cast<std::uint32_t>(scaled%rate);
-    deadline_=started+std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(scaled/rate));
+    const auto interval=std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(scaled/rate));
+    // A late frame nearer the next slot must not be followed by a short burst.
+    if(started-deadline_>=interval/2)deadline_=started;
+    deadline_+=interval;
 }
 NativePresentationClock::Clock::time_point NativePresentationClock::Deadline() const noexcept
 {
@@ -324,7 +339,8 @@ std::filesystem::path nativeExecutablePath()
 #endif
 }
 
-NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& executable,
+namespace {
+NativeProcessLaunch ParseNativeProcessLaunch(const std::filesystem::path& executable,
     const std::filesystem::path& workingDirectory,const std::vector<std::filesystem::path>& arguments)
 {
     const auto work=std::filesystem::absolute(workingDirectory).lexically_normal();
@@ -369,7 +385,9 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
             else if(value=="msaa2")result.antialiasing=2;
             else if(value=="msaa4")result.antialiasing=3;
             else if(value=="msaa8")result.antialiasing=4;
-            else throw std::invalid_argument("--aa must be off, msaa2, msaa4 or msaa8");
+            else if(value=="smaa2")result.antialiasing=5;
+            else if(value=="smaa4")result.antialiasing=6;
+            else throw std::invalid_argument("--aa must be off, msaa2, msaa4, msaa8, smaa2 or smaa4");
         } else if(argument=="--anisotropy") {
             const auto value=next().u8string();
             if(value=="2" || value=="4" || value=="8" || value=="16")result.anisotropy=std::stoi(value);
@@ -380,11 +398,15 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
         else if(argument=="--help" || argument=="-h")result.showHelp=true;
         else throw std::invalid_argument("Unknown native application option: "+argument.u8string());
     }
-    if(!result.configurationSpecified)result.configuration=result.profileDirectory/"config.ini";
+    if(!result.configurationSpecified)result.configuration=result.profileDirectory/NativeTrackOverrideFilename;
     if(result.showHelp)return result;
     if(result.width && *result.width<320)throw std::invalid_argument("--width must be at least 320");
     if(result.height && *result.height<240)throw std::invalid_argument("--height must be at least 240");
-    if(result.configureOnly)return result;
+    return result;
+}
+
+void ResolveNativeGameData(const std::filesystem::path& executable,NativeProcessLaunch& result)
+{
     if(!result.dataSource.empty()) {
         const auto& source=result.dataSource;
         if(result.archiveData) {
@@ -399,23 +421,23 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
         } else if(!OrdinaryFile(source)) {
             throw std::runtime_error("Selected game-data source does not exist or is not an ordinary file/directory: "+source.u8string());
         }
-        return result;
+        return;
     }
-    const auto directories=NativeDataDirectories(directory);
+    const auto directories=NativeDataDirectories(executable.parent_path());
     std::filesystem::path incompletePair;
     // Native PC releases use editable, unpacked resources by default. The
     // original archive is a fallback for installations without extraction,
     // or an explicit --zzdata request. Preserve hashed unknown-file lookup
     // through the extracted __archive/ZDIR.BIN sidecar in GameResources.
     if(!result.archiveData)for(const auto& candidate:directories)if(LooseGameDirectory(candidate)) {
-        result.dataSource=candidate;return result;
+        result.dataSource=candidate;return;
     }
     // Archive selection is still available for an archive-only installation.
     for(const auto& candidate:directories) {
         const auto index=ProcessChild(candidate,"ZDIR.BIN");
         const auto data=ProcessChild(candidate,"ZZDATA.BIN");
         if(OrdinaryFile(index) && OrdinaryFile(data)) {
-            result.dataSource=data;result.archiveData=true;return result;
+            result.dataSource=data;result.archiveData=true;return;
         }
         if(incompletePair.empty() && (OrdinaryFile(index) || OrdinaryFile(data)))incompletePair=candidate;
     }
@@ -427,6 +449,16 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
 }
 }
 
+NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& executable,
+    const std::filesystem::path& workingDirectory,const std::vector<std::filesystem::path>& arguments)
+{
+    auto launch=ParseNativeProcessLaunch(executable,workingDirectory,arguments);
+    if(!launch.showHelp && !launch.configureOnly)
+        ResolveNativeGameData(ResolveArgumentPath(executable,std::filesystem::absolute(workingDirectory)),launch);
+    return launch;
+}
+}
+
 #if defined(_WIN32) && defined(HP2_ENABLE_VULKAN)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -435,6 +467,7 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
 #include <commctrl.h>
 #include <dbghelp.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include "indep/inc/Flags.hpp"
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/Ecstasy.hpp"
@@ -447,9 +480,11 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
 #include <array>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
+#include <tuple>
 
 namespace hp2 {
 namespace {
@@ -901,7 +936,7 @@ std::wstring NativeWideText(const std::string& value)
 }
 
 struct NativeWindowsMonitor {
-    std::string id;
+    std::string id,displayName;
     std::wstring name;
     HMONITOR handle{};
     RECT display{},work{};
@@ -918,10 +953,11 @@ std::vector<NativeWindowsMonitor> NativeWindowsMonitors()
             if(!GetMonitorInfoW(handle,&info))throw std::runtime_error("Could not read Windows monitor information");
             NativeWindowsMonitor item;item.handle=handle;item.display=info.rcMonitor;item.work=info.rcWork;
             item.primary=(info.dwFlags&MONITORINFOF_PRIMARY)!=0;
-            item.id=std::filesystem::path(info.szDevice).u8string();
+            item.displayName=std::filesystem::path(info.szDevice).u8string();
             DISPLAY_DEVICEW display{};display.cb=sizeof(display);
-            const bool named=EnumDisplayDevicesW(info.szDevice,0,&display,0)!=FALSE && display.DeviceString[0]!=0;
-            item.name=info.szDevice;item.name+=L" - ";item.name+=named?display.DeviceString:L"Monitor";
+            const bool found=EnumDisplayDevicesW(info.szDevice,0,&display,EDD_GET_DEVICE_INTERFACE_NAME)!=FALSE;
+            item.id=found && display.DeviceID[0] ? std::filesystem::path(display.DeviceID).u8string():item.displayName;
+            item.name=info.szDevice;item.name+=L" - ";item.name+=found && display.DeviceString[0]?display.DeviceString:L"Monitor";
             item.name+=L" ("+std::to_wstring(info.rcMonitor.right-info.rcMonitor.left)+L" x "+
                 std::to_wstring(info.rcMonitor.bottom-info.rcMonitor.top)+L")";
             if(item.primary)item.name+=L" [Primary]";
@@ -933,15 +969,104 @@ std::vector<NativeWindowsMonitor> NativeWindowsMonitors()
     Require(enumerated!=FALSE && !result.monitors.empty(),"No active Windows monitor is available");
     std::stable_sort(result.monitors.begin(),result.monitors.end(),[](const auto& left,const auto& right) {
         if(left.primary!=right.primary)return left.primary;
-        return left.id<right.id;
+        return left.displayName<right.displayName;
     });
     return result.monitors;
 }
+bool NativeMonitorMatches(const NativeWindowsMonitor& monitor,const std::string& id)
+{return monitor.id==id || monitor.displayName==id;}
+
 NativeWindowsMonitor NativeChooseMonitor(const std::string& id)
 {
     auto monitors=NativeWindowsMonitors();
-    const auto found=std::find_if(monitors.begin(),monitors.end(),[&](const auto& item){return item.id==id;});
+    const auto found=std::find_if(monitors.begin(),monitors.end(),[&](const auto& item){return NativeMonitorMatches(item,id);});
     return found==monitors.end()?monitors.front():*found;
+}
+
+std::pair<DWORD,DWORD> NativeWindowsMonitorResolution(const NativeWindowsMonitor& monitor)
+{
+    const auto device=NativeWideText(monitor.displayName);
+    const auto id=NativeWideText(monitor.id);
+    const std::pair<DWORD,DWORD> desktop{static_cast<DWORD>(monitor.display.right-monitor.display.left),
+        static_cast<DWORD>(monitor.display.bottom-monitor.display.top)};
+    // GDI lists source modes, including modes scaled by the GPU. Resolve the
+    // active output and query the monitor's preferred target mode separately.
+    for(int attempt=0;attempt<3;++attempt) {
+        UINT32 pathCount{},modeCount{};
+        if(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&pathCount,&modeCount)!=ERROR_SUCCESS)break;
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        const auto result=QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,&pathCount,paths.data(),&modeCount,modes.data(),nullptr);
+        if(result==ERROR_INSUFFICIENT_BUFFER)continue;
+        if(result!=ERROR_SUCCESS)break;
+        std::optional<std::pair<DWORD,DWORD>> linkedOutput;
+        for(UINT32 index=0;index<pathCount;++index) {
+            const auto& path=paths[index];
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+            source.header={DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,sizeof(source),path.sourceInfo.adapterId,path.sourceInfo.id};
+            if(DisplayConfigGetDeviceInfo(&source.header)!=ERROR_SUCCESS ||
+                _wcsicmp(device.c_str(),source.viewGdiDeviceName)!=0)continue;
+            DISPLAYCONFIG_TARGET_PREFERRED_MODE preferred{};
+            preferred.header={DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE,sizeof(preferred),path.targetInfo.adapterId,path.targetInfo.id};
+            if(DisplayConfigGetDeviceInfo(&preferred.header)!=ERROR_SUCCESS || !preferred.width || !preferred.height)continue;
+            std::pair<DWORD,DWORD> resolution{preferred.width,preferred.height};
+            const auto rotation=path.targetInfo.rotation;
+            if(rotation==DISPLAYCONFIG_ROTATION_ROTATE90 || rotation==DISPLAYCONFIG_ROTATION_ROTATE270)
+                std::swap(resolution.first,resolution.second);
+            DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
+            target.header={DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,sizeof(target),path.targetInfo.adapterId,path.targetInfo.id};
+            if(DisplayConfigGetDeviceInfo(&target.header)==ERROR_SUCCESS &&
+                _wcsicmp(id.c_str(),target.monitorDevicePath)==0)return resolution;
+            if(!linkedOutput)linkedOutput=resolution;
+            else {
+                linkedOutput->first=std::min(linkedOutput->first,resolution.first);
+                linkedOutput->second=std::min(linkedOutput->second,resolution.second);
+            }
+        }
+        return linkedOutput.value_or(desktop);
+    }
+    return desktop;
+}
+
+bool NativeWindowsModeFits(const DEVMODEW& mode,std::pair<DWORD,DWORD> extent) noexcept
+{
+    return mode.dmBitsPerPel>=32 && mode.dmPelsWidth>=320 && mode.dmPelsHeight>=240 &&
+        mode.dmPelsWidth<=std::min<DWORD>(16384,extent.first) && mode.dmPelsHeight<=std::min<DWORD>(16384,extent.second);
+}
+
+std::vector<DEVMODEW> NativeWindowsDisplayModes(const NativeWindowsMonitor& monitor,std::pair<DWORD,DWORD> extent)
+{
+    const auto device=NativeWideText(monitor.displayName);
+    std::vector<DEVMODEW> modes;
+    for(DWORD index=0;;++index) {
+        DEVMODEW mode{};mode.dmSize=sizeof(mode);
+        if(!EnumDisplaySettingsExW(device.c_str(),index,&mode,0))break;
+        if(NativeWindowsModeFits(mode,extent)) {
+            mode.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT|DM_BITSPERPEL|DM_DISPLAYFLAGS|DM_DISPLAYFREQUENCY;
+            modes.push_back(mode);
+        }
+    }
+    return modes;
+}
+std::vector<std::pair<int,int>> NativeWindowsResolutions(const NativeWindowsMonitor& monitor)
+{
+    const auto device=NativeWideText(monitor.displayName);
+    const auto extent=NativeWindowsMonitorResolution(monitor);
+    std::vector<std::pair<int,int>> sizes;
+    // The mode already in use is valid even when the desktop session
+    // cannot submit a trial mode change (for example via a remote display).
+    DEVMODEW current{};current.dmSize=sizeof(current);
+    if(EnumDisplaySettingsExW(device.c_str(),ENUM_CURRENT_SETTINGS,&current,0) &&
+        NativeWindowsModeFits(current,extent))
+        sizes.emplace_back(static_cast<int>(current.dmPelsWidth),static_cast<int>(current.dmPelsHeight));
+    for(auto mode:NativeWindowsDisplayModes(monitor,extent)) {
+        const auto size=std::make_pair(static_cast<int>(mode.dmPelsWidth),static_cast<int>(mode.dmPelsHeight));
+        if(std::find(sizes.begin(),sizes.end(),size)==sizes.end() &&
+            ChangeDisplaySettingsExW(device.c_str(),&mode,nullptr,CDS_TEST,nullptr)==DISP_CHANGE_SUCCESSFUL)
+            sizes.push_back(size);
+    }
+    std::sort(sizes.begin(),sizes.end());
+    return sizes;
 }
 
 // Module-owned LR_SHARED icons are reused by the launcher and game window.
@@ -960,12 +1085,51 @@ void NativeSetApplicationIcons(WNDCLASSEXW& windowClass)
 // receives the source pad scanner, FRED settings and original Config cells.
 #include "NativeConfigurator.inl"
 
+namespace {
+struct WindowsMenuPointer {
+    struct Sample {
+        POINT point;
+        bool pressed{},held{},released{};
+    };
+    std::optional<POINT> press,release,motion;
+    POINT dragPoint{};
+    bool captured{};
+
+    void Press(POINT point,bool capture) noexcept
+    {
+        press=point;release.reset();motion.reset();
+        dragPoint=point;captured=capture;
+    }
+    void Move(POINT point) noexcept
+    {
+        motion=point;
+        if(captured)dragPoint=point;
+    }
+    void Release(POINT point) noexcept
+    {
+        if(!captured)return;
+        captured=false;release=point;motion.reset();
+    }
+    std::optional<Sample> Take() noexcept
+    {
+        if(const auto point=std::exchange(press,std::nullopt)) {
+            if(release && release->x==point->x && release->y==point->y)release.reset();
+            return Sample{*point,true,captured || release.has_value(),false};
+        }
+        if(const auto point=std::exchange(release,std::nullopt))return Sample{*point,false,false,true};
+        if(const auto point=std::exchange(motion,std::nullopt))return Sample{*point,false,captured,false};
+        return std::nullopt;
+    }
+};
+}
+
 class WindowsApplicationHost final:public NativeApplicationHost {
     NativeCrashReporter& session_;
 public:
-    WindowsApplicationHost(const NativePcSettings& settings,NativeCrashReporter& session)
+    WindowsApplicationHost(const NativePcSettings& settings,NativeCrashReporter& session,const std::filesystem::path& pcFile,
+        const std::filesystem::path& dataDirectory)
         :session_(session),width_(static_cast<std::uint32_t>(settings.width)),height_(static_cast<std::uint32_t>(settings.height)),
-        monitorDevice_(settings.monitorDevice)
+        monitorDevice_(settings.monitorDevice),pcSettings_(settings),pcFile_(pcFile)
     {
         instance_=GetModuleHandleW(nullptr);
         (void)SetProcessDPIAware();
@@ -981,6 +1145,17 @@ public:
             nullptr,nullptr,instance_,this);
         if(!window_) {UnregisterClassW(windowClass.lpszClassName,instance_);class_=0;throw std::runtime_error("Could not create the NFSHP2 native window");}
         try {
+            const auto executableDirectory=nativeExecutablePath().parent_path();
+            for(const auto& directory:{executableDirectory,dataDirectory}) {
+                for(const auto* name:{L"cursor.cur",L"cursor.ani"}) {
+                    fileCursor_=LoadCursorFromFileW((directory/L"data"/L"ui"/name).c_str());
+                    if(fileCursor_)break;
+                }
+                if(fileCursor_)break;
+            }
+            menuCursor_=fileCursor_?fileCursor_:static_cast<HCURSOR>(LoadImageW(instance_,
+                MAKEINTRESOURCEW(IDC_NFSHP2_MENU),IMAGE_CURSOR,0,0,LR_DEFAULTSIZE|LR_SHARED));
+            Require(menuCursor_,"Could not load the native menu cursor");
             presentationLimit_.SetLimit(settings.frameLimit);
             presentationLimit_.Reset(FrameTime());
             constexpr DWORD highResolutionTimer=0x00000002u;
@@ -988,13 +1163,8 @@ public:
             if(!frameTimer_)frameTimer_=CreateWaitableTimerW(nullptr,FALSE,nullptr);
             ApplyDisplaySettings(settings.width,settings.height,settings.fullscreen,settings.vsync);
             input_=std::make_unique<WindowsInputDevice>(window_,settings.input);
-            RefreshClientSize();EcstasyVulkanOptions options;options.width=width_;options.height=height_;
-            options.logicalWidth=width_;options.logicalHeight=height_;options.nativeInstance=instance_;options.nativeWindow=window_;
-            options.vsync=settings.vsync;options.fixedRenderExtent=true;
-            options.textureFilter=static_cast<EcstasyTextureFilter>(settings.textureFilter);
-            options.antialiasing=static_cast<EcstasyAntialiasing>(settings.antialiasing);
-            options.anisotropy=static_cast<std::uint32_t>(settings.anisotropy);
-            graphics_=std::make_unique<EcstasyVulkanDevice>(options);
+            RefreshClientSize();
+            graphics_=CreateGraphics(settings);
             LARGE_INTEGER frequency{};
             Require(QueryPerformanceFrequency(&frequency)!=FALSE && frequency.QuadPart>0,
                 "Windows display QPC frequency is unavailable");
@@ -1010,6 +1180,10 @@ public:
         Require(!presentationClock_,"Windows display clock is already bound");
         presentationClock_=&clock;PublishRefreshTiming();
     }
+    void BindFullscreenToggle(std::function<void()> action)
+    {
+        fullscreenToggle_=std::move(action);
+    }
 
     bool PollEvents() override
     {
@@ -1018,6 +1192,7 @@ public:
         for(;;) {
             while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
                 if(message.message==WM_QUIT)return false;
+                if(message.hwnd==window_ && HandleFullscreenShortcut(message.message,message.wParam,message.lParam))continue;
                 TranslateMessage(&message);
                 dispatchInputTime_=input_?input_->MessageTime(message.time):FrameTime();
                 dispatchInputMessage_=&message;DispatchMessageW(&message);dispatchInputMessage_=nullptr;
@@ -1028,12 +1203,19 @@ public:
             if(!WaitMessage())throw std::runtime_error("Win32 WaitMessage failed while minimized");
         }
         if(wasMinimized) {++presentationTimingEpoch_;presentationLimit_.Reset(FrameTime());}
-        input_->Poll();
+        if((GetAsyncKeyState(VK_RETURN)&0x8000)==0)fullscreenShortcutKeys_.fill(false);
+        input_->Poll(fullscreenShortcutKeys_[0] || fullscreenShortcutKeys_[1]);
+        RefreshMenuCursor();
         RefreshClientSize();
         if(displayChanged_ && appliedDisplayRequest_) {
             const auto request=*appliedDisplayRequest_;appliedDisplayRequest_.reset();displayChanged_=false;
             ApplyDisplaySettings(request[0],request[1],request[2]!=0,request[3]!=0);
         }
+        if(fullscreenTogglePending_ && fullscreenToggle_) {
+            fullscreenTogglePending_=false;
+            fullscreenToggle_();
+        }
+        if(graphics_)graphics_->CollectCompletedSunDepth();
         PublishRefreshTiming();
         return true;
     }
@@ -1062,6 +1244,114 @@ public:
     {input_->BeginStep(boundary);}
     int32_t ReadInput(int32_t port,JoystickControls& destination) override
     {return input_->ReadInput(port,destination);}
+    void SetMenuInput(bool menu,bool pause,bool split) noexcept override
+    {input_->SetMenuInput(menu,pause,split);}
+    void SetReplayInput(bool enabled) noexcept override
+    {replayInput_=enabled;input_->SetReplayInput(enabled);}
+    bool MenuPointerHeld() const noexcept override
+    {return replayInput_?(GetKeyState(VK_LBUTTON)&0x8000)!=0:menuPointerHeld_;}
+    void SetMenuPointer(bool enabled) noexcept override
+    {
+        if(menuPointerEnabled_==enabled)return;
+        menuPointerEnabled_=enabled;
+        if(!enabled) {
+            if(menuPointer_.captured && GetCapture()==window_)ReleaseCapture();
+            menuPointer_={};menuPointerHeld_=false;
+            pointerMoved_=false;pointerClick_=false;wheelDelta_=0;lastMouseUse_=0;
+        }
+        RefreshMenuCursor();
+    }
+    std::pair<int,int> MenuMonitorSize() const noexcept override
+    {
+        MONITORINFO monitor{};monitor.cbSize=sizeof(monitor);
+        if(!GetMonitorInfoW(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),&monitor))return {16384,16384};
+        return {monitor.rcMonitor.right-monitor.rcMonitor.left,monitor.rcMonitor.bottom-monitor.rcMonitor.top};
+    }
+    bool ReadMenuPointer(float& x,float& y,bool& click,int& wheel) noexcept override
+    {
+        wheel=std::exchange(wheelDelta_,0)/WHEEL_DELTA;
+        if(!menuPointerEnabled_ || !clientWidth_ || !clientHeight_)return false;
+        const auto sample=replayInput_?std::nullopt:menuPointer_.Take();
+        const bool released=sample && sample->released;
+        if(GetForegroundWindow()!=window_ && !released)return false;
+        POINT point{};
+        if(sample) {
+            point=sample->point;click=sample->pressed;menuPointerHeld_=sample->held;
+        } else {
+            click=replayInput_ && std::exchange(pointerClick_,false);
+            const bool moved=replayInput_ && std::exchange(pointerMoved_,false);
+            if(!moved && !click && !wheel && !(replayInput_ && MenuPointerHeld()))return false;
+            if(!GetCursorPos(&point) || !ScreenToClient(window_,&point))return false;
+        }
+        const auto width=static_cast<float>(clientWidth_),height=static_cast<float>(clientHeight_);
+        const auto [canvasWidth,canvasHeight]=LogicalCanvas();
+        const float logicalWidth=static_cast<float>(canvasWidth);
+        const float logicalHeight=static_cast<float>(canvasHeight);
+        const float scale=std::min(width/logicalWidth,height/logicalHeight);
+        const std::array<float,4> presentation{{(width-logicalWidth*scale)*0.5f,(height-logicalHeight*scale)*0.5f,
+            logicalWidth*scale,logicalHeight*scale}};
+        const auto viewport=racePresentation_?presentation:
+            ecstasyNativeUiViewport(EcstasyUiPlacement::CenteredCanvas,presentation);
+        const bool outside=point.x<viewport[0] || point.y<viewport[1] ||
+            point.x>=viewport[0]+viewport[2] || point.y>=viewport[1]+viewport[3];
+        if(outside && (click || replayInput_ || !(menuPointerHeld_ || released)))return false;
+        x=std::clamp((static_cast<float>(point.x)-viewport[0])*640.0f/viewport[2],0.0f,640.0f);
+        y=std::clamp((static_cast<float>(point.y)-viewport[1])*480.0f/viewport[3],0.0f,480.0f);
+        input_->UseKeyboardPrompts();
+        return true;
+    }
+    platform::NativePromptDevice PromptDevice() const noexcept override {return input_->PromptDevice();}
+    platform::NativePromptDevice GamepadPromptDevice(std::int32_t port) const noexcept override
+    {return input_->GamepadPromptDevice(port);}
+    const NativePcSettings* PcSettings() const noexcept override {return &pcSettings_;}
+    void PreviewDualSenseVolume(std::int32_t port,std::optional<std::int32_t> volume) noexcept override
+    {input_->PreviewDualSenseVolume(port,volume);}
+    void PreviewMasterVolume(std::optional<std::int32_t> gain) noexcept override {previewMasterVolume_=gain;}
+    bool SavePcSettings(const NativePcSettings& settings,std::string& error) override
+    {
+        const auto previous=pcSettings_;
+        const bool rebuild=previous.antialiasing!=settings.antialiasing ||
+            previous.textureFilter!=settings.textureFilter || previous.anisotropy!=settings.anisotropy;
+        const bool display=previous.width!=settings.width || previous.height!=settings.height ||
+            previous.fullscreenSize!=settings.fullscreenSize ||
+            previous.fullscreen!=settings.fullscreen || previous.vsync!=settings.vsync;
+        const bool resize=previous.raceAspect!=settings.raceAspect || previous.renderScale!=settings.renderScale;
+        try {validateNativePcSettings(settings);}
+        catch(const std::exception& failure) {error=failure.what();return false;}
+        const auto apply=[&](const NativePcSettings& requested) {
+            pcSettings_=requested;
+            if(rebuild)graphics_.reset();
+            if(display)ApplyDisplaySettings(requested.width,requested.height,requested.fullscreen,requested.vsync);
+            if(rebuild)graphics_=CreateGraphics(requested);
+            else if(resize)ResizeRenderTargets();
+            input_->SetSettings(requested.input);
+            presentationLimit_.SetLimit(requested.frameLimit);
+            graphics_->SetSharpScaling(requested.sharpScaling);
+            configureNativeRenderSettings(requested.render);
+            applicationShowFrameRate=requested.showFps;
+        };
+        try {
+            apply(settings);
+            saveNativePcSettings(pcFile_,settings);
+            return true;
+        } catch(const std::exception& failure) {
+            error=failure.what();
+            apply(previous);
+            return false;
+        }
+    }
+    bool HasDualSense(std::int32_t port) const noexcept override {return input_->HasDualSense(port);}
+    void SetDrivingTriggers(std::int32_t port,std::uint32_t throttle,std::uint32_t brake) noexcept override
+    {input_->SetDrivingTriggers(port,throttle,brake);}
+    std::string InputDeviceName(std::int32_t port) const override {return input_->DeviceName(port);}
+    void BeginBindingCapture(std::int32_t port) noexcept override {input_->BeginBindingCapture(port);}
+    std::uint16_t CapturedKey() const noexcept override {return input_->CapturedKey();}
+    void SetMenuTextInput(bool enabled) noexcept override {menuTextInput_=enabled;menuTextLength_=0;}
+    std::string TakeMenuTextInput() override
+    {
+        const auto length=std::exchange(menuTextLength_,std::size_t{});
+        return std::string(menuText_.data(),length);
+    }
     void SetRumble(int32_t port,uint8_t smallMotor,uint8_t large) override {input_->SetRumble(port,smallMotor,large);}
     void SubmitFrame(EcstasyFrame& frame) override
     {
@@ -1098,7 +1388,15 @@ public:
     }
     WorldAudioResult PumpAudio(bSound& sound) override
     {
-        const auto result=sound.PumpWindowsDevice();
+        std::int32_t volume=100;
+        const auto controller=input_->DualSenseSpeakerContainer(volume);
+        sound.SetWindowsRadioController(controller,static_cast<float>(volume)/100.0f);
+        auto result=sound.PumpWindowsDevice();
+        const auto gain=previewMasterVolume_.value_or(pcSettings_.masterVolume);
+        if(result==WORLD_AUDIO_OK && actualMasterVolume_!=gain) {
+            result=sound.SetWindowsMasterVolume(static_cast<float>(gain)/100.0f);
+            if(result==WORLD_AUDIO_OK)actualMasterVolume_=gain;
+        }
         if(result!=audioPumpResult_) {
             audioPumpResult_=result;char detail[128]{};
             std::snprintf(detail,sizeof(detail),"operation=pump result=%d",static_cast<int>(result));RecordSessionEvent("audio.device",detail);
@@ -1111,8 +1409,16 @@ public:
         std::snprintf(detail,sizeof(detail),"operation=close result=%d",static_cast<int>(result));RecordSessionEvent("audio.device",detail);
         return result;
     }
-    int Width() const override {return static_cast<int>(width_);}
-    int Height() const override {return static_cast<int>(height_);}
+    int Width() const override {return LogicalCanvas().first;}
+    int Height() const override {return LogicalCanvas().second;}
+    std::vector<std::pair<int,int>> MenuDisplayModes() const override
+    {return NativeWindowsResolutions(NativeChooseMonitor(monitorDevice_));}
+    void SetRacePresentation(bool racing) override
+    {
+        if(racePresentation_==racing)return;
+        racePresentation_=racing;
+        ResizeRenderTargets();
+    }
     std::size_t AvailableMemory() const override
     {
         MEMORYSTATUSEX status{};status.dwLength=sizeof(status);
@@ -1122,7 +1428,8 @@ public:
     void ApplyDisplaySettings(int width,int height,bool fullscreen,bool vsync) override
     {
         Require(width>=320 && height>=240 && width<=16384 && height<=16384,"Invalid native display resolution");
-        const std::array<int,4> request{{width,height,fullscreen?1:0,vsync?1:0}};
+        const auto fullSize=fullscreen?pcSettings_.fullscreenSize:std::pair<int,int>{};
+        const std::array<int,6> request{{width,height,fullscreen?1:0,vsync?1:0,fullSize.first,fullSize.second}};
         if(appliedDisplayRequest_ && *appliedDisplayRequest_==request)return;
         // Only the frame decoration changes. The existing visibility and
         // minimized/maximized state belong to the live HWND, not the saved
@@ -1133,7 +1440,11 @@ public:
         const DWORD decorations=WS_POPUP|WS_OVERLAPPEDWINDOW;
         const DWORD style=(static_cast<DWORD>(currentStyle)&~decorations)|
             (fullscreen ? WS_POPUP:NativeFixedWindowStyle);
-        const auto monitor=NativeChooseMonitor(monitorDevice_);
+        auto monitor=NativeChooseMonitor(monitorDevice_);
+        SetFullscreenMode(monitor,fullSize);
+        monitor=NativeChooseMonitor(monitorDevice_);
+        if(!appliedDisplayRequest_)
+            session_.Event("renderer.monitor",monitor.displayName.c_str());
         RECT rectangle{0,0,width,height};int x=CW_USEDEFAULT,y=CW_USEDEFAULT;
         if(fullscreen) {
             rectangle=monitor.display;x=rectangle.left;y=rectangle.top;
@@ -1146,17 +1457,114 @@ public:
         Require(previous!=0 || GetLastError()==0,"Windows display style change failed");
         geometryChange_=true;
         const auto changed=SetWindowPos(window_,nullptr,x,y,rectangle.right-rectangle.left,rectangle.bottom-rectangle.top,
-            SWP_FRAMECHANGED|SWP_NOOWNERZORDER|SWP_NOZORDER);
+            SWP_FRAMECHANGED|SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER);
         geometryChange_=false;Require(changed!=FALSE,"Windows display size change failed");
         RECT actual{};Require(GetWindowRect(window_,&actual)!=FALSE,"Windows outer rectangle is unavailable");
         lockedOuterWidth_=actual.right-actual.left;lockedOuterHeight_=actual.bottom-actual.top;
-        width_=static_cast<std::uint32_t>(width);height_=static_cast<std::uint32_t>(height);
         RefreshClientSize();
-        if(graphics_) {graphics_->ConfigurePresentation(vsync);graphics_->Resize(width_,height_);graphics_->SetLogicalSize(width_,height_);}
+        width_=clientWidth_;height_=clientHeight_;
+        if(graphics_) {
+            graphics_->ConfigurePresentation(vsync);
+            ResizeRenderTargets();
+        }
         appliedDisplayRequest_=request;
     }
 private:
-
+    void SetFullscreenMode(const NativeWindowsMonitor& monitor,std::pair<int,int> requested)
+    {
+        const auto device=NativeWideText(monitor.displayName);
+        if(activeDisplayMode_ && (requested.first==0 || displayModeDevice_!=device)) {
+            const auto result=ChangeDisplaySettingsExW(displayModeDevice_.c_str(),&desktopMode_,nullptr,0,nullptr);
+            Require(result==DISP_CHANGE_SUCCESSFUL,"Windows could not restore the desktop display mode");
+            activeDisplayMode_=false;
+        }
+        if(requested.first==0)return;
+        DEVMODEW current{};current.dmSize=sizeof(current);
+        Require(EnumDisplaySettingsExW(device.c_str(),ENUM_CURRENT_SETTINGS,&current,0)!=FALSE,
+            "Cannot read the desktop display mode");
+        if(requested==std::make_pair(static_cast<int>(current.dmPelsWidth),static_cast<int>(current.dmPelsHeight)))return;
+        const auto modes=NativeWindowsDisplayModes(monitor,NativeWindowsMonitorResolution(monitor));
+        const auto desktopRate=static_cast<int>(activeDisplayMode_?desktopMode_.dmDisplayFrequency:current.dmDisplayFrequency);
+        const auto score=[desktopRate](const DEVMODEW& mode) {
+            return std::make_pair((mode.dmDisplayFlags&DM_INTERLACED)!=0,
+                std::abs(static_cast<int>(mode.dmDisplayFrequency)-desktopRate));
+        };
+        std::optional<DEVMODEW> best;
+        for(auto mode:modes) {
+            if(mode.dmPelsWidth!=static_cast<DWORD>(requested.first) || mode.dmPelsHeight!=static_cast<DWORD>(requested.second))continue;
+            if((!best || score(mode)<score(*best)) &&
+                ChangeDisplaySettingsExW(device.c_str(),&mode,nullptr,CDS_TEST,nullptr)==DISP_CHANGE_SUCCESSFUL)
+                best=mode;
+        }
+        Require(best.has_value(),"The selected monitor does not support the requested fullscreen resolution");
+        auto mode=*best;
+        if(!activeDisplayMode_) {
+            desktopMode_=current;displayModeDevice_=device;
+            desktopMode_.dmFields=mode.dmFields;
+        }
+        Require(ChangeDisplaySettingsExW(device.c_str(),&mode,nullptr,CDS_FULLSCREEN,nullptr)==DISP_CHANGE_SUCCESSFUL,
+            "Windows could not apply the requested fullscreen mode");
+        activeDisplayMode_=true;
+    }
+    std::unique_ptr<EcstasyVulkanDevice> CreateGraphics(const NativePcSettings& settings)
+    {
+        EcstasyVulkanOptions options;
+        const auto [width,height]=LogicalCanvas();
+        options.width=RenderExtent(width,height);options.height=RenderExtent(height,height);
+        options.logicalWidth=static_cast<std::uint32_t>(width);options.logicalHeight=static_cast<std::uint32_t>(height);
+        options.nativeInstance=instance_;options.nativeWindow=window_;
+        options.vsync=settings.vsync;options.fixedRenderExtent=true;
+        options.textureFilter=static_cast<EcstasyTextureFilter>(settings.textureFilter);
+        options.antialiasing=static_cast<EcstasyAntialiasing>(settings.antialiasing);
+        options.anisotropy=static_cast<std::uint32_t>(settings.anisotropy);
+        options.adapterId=settings.videoAdapter;
+        auto result=std::make_unique<EcstasyVulkanDevice>(options);
+        result->SetSharpScaling(settings.sharpScaling);
+        return result;
+    }
+    std::pair<int,int> LogicalCanvas() const noexcept
+    {
+        return nativeFitAspect({static_cast<int>(width_),static_cast<int>(height_)},
+            racePresentation_?pcSettings_.raceAspect:std::pair<int,int>{});
+    }
+    void ResizeRenderTargets()
+    {
+        if(!graphics_)return;
+        const auto [width,height]=LogicalCanvas();
+        graphics_->Resize(RenderExtent(width,height),RenderExtent(height,height));
+        graphics_->SetLogicalSize(static_cast<std::uint32_t>(width),static_cast<std::uint32_t>(height));
+    }
+    std::uint32_t RenderExtent(int dimension,int logicalHeight) const noexcept
+    {
+        if(!pcSettings_.renderScale)return static_cast<std::uint32_t>(dimension);
+        const auto pixels=static_cast<std::uint64_t>(dimension)*448u*static_cast<unsigned>(pcSettings_.renderScale)/
+            static_cast<unsigned>(logicalHeight);
+        return static_cast<std::uint32_t>(std::clamp(pixels,std::uint64_t{1},std::uint64_t{16384}));
+    }
+    bool HandleFullscreenShortcut(UINT message,WPARAM key,LPARAM keyFlags) noexcept
+    {
+        if(key!=VK_RETURN)return false;
+        constexpr ULONG_PTR extendedKey=1u<<24;
+        constexpr ULONG_PTR altContext=1u<<29;
+        constexpr ULONG_PTR previouslyDown=1u<<30;
+        const auto flags=static_cast<ULONG_PTR>(keyFlags);
+        auto& consumed=fullscreenShortcutKeys_[(flags&extendedKey)!=0 ? 1 : 0];
+        if(message==WM_KEYUP || message==WM_SYSKEYUP) {
+            const bool wasConsumed=consumed;
+            consumed=false;
+            return wasConsumed;
+        }
+        if(message==WM_SYSCHAR)return consumed;
+        if(message!=WM_KEYDOWN && message!=WM_SYSKEYDOWN)return false;
+        if(flags&previouslyDown)return consumed;
+        consumed=message==WM_SYSKEYDOWN && (flags&altContext)!=0 &&
+            GetFocus()==window_ && GetForegroundWindow()==window_ && (GetKeyState(VK_CONTROL)&0x8000)==0;
+        if(consumed) {
+            fullscreenTogglePending_=!fullscreenTogglePending_;
+            suppressAltMenu_=true;
+        }
+        return consumed;
+    }
     void PublishRefreshTiming()
     {
         Require(presentationClock_,"Windows display clock has no live GameTime owner");
@@ -1173,6 +1581,27 @@ private:
             graphicsNotifyPresentationComplete();platformNotifyVideoBlank();
         }
     }
+    bool MenuCursorVisible() const noexcept
+    {
+        return menuPointerEnabled_ && lastMouseUse_ && GetTickCount64()-lastMouseUse_<3000u &&
+            (!input_ || input_->PromptDevice()==platform::NativePromptDevice::Keyboard);
+    }
+    void RefreshMenuCursor() noexcept
+    {
+        const bool visible=MenuCursorVisible();
+        if(cursorVisible_==visible)return;
+        cursorVisible_=visible;
+        POINT point{};RECT client{};
+        if(GetForegroundWindow()==window_ && GetCursorPos(&point) && WindowFromPoint(point)==window_ &&
+            ScreenToClient(window_,&point) && GetClientRect(window_,&client) && PtInRect(&client,point))
+            SetCursor(visible?menuCursor_:nullptr);
+    }
+    void OnMouseUse() noexcept
+    {
+        lastMouseUse_=GetTickCount64();
+        input_->UseKeyboardPrompts();
+        RefreshMenuCursor();
+    }
     static LRESULT CALLBACK WindowProcedure(HWND window,UINT message,WPARAM first,LPARAM second)
     {
         auto* self=reinterpret_cast<WindowsApplicationHost*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -1182,13 +1611,81 @@ private:
         }
         if(message==WM_SYSCOMMAND && ((first&0xfff0u)==SC_SIZE || (first&0xfff0u)==SC_MAXIMIZE))return 0;
         if(self && self->input_) {
+            if(message==WM_KEYDOWN && (static_cast<std::uintptr_t>(second)&(std::uintptr_t{1}<<30))==0) {
+                self->lastMouseUse_=0;
+                self->RefreshMenuCursor();
+            }
+            if(self->menuTextInput_) {
+                if(message==WM_CHAR) {
+                    if((first==8 || first==13 || (first>=32 && first<=126)) &&
+                        self->menuTextLength_<self->menuText_.size())
+                        self->menuText_[self->menuTextLength_++]=static_cast<char>(first);
+                    self->input_->UseKeyboardPrompts();
+                    return 0;
+                }
+                if(message==WM_KEYDOWN) {
+                    char edit{};
+                    switch(first) {
+                    case VK_LEFT:edit=static_cast<char>(NativeMenuTextKey::Left);break;
+                    case VK_RIGHT:edit=static_cast<char>(NativeMenuTextKey::Right);break;
+                    case VK_HOME:edit=static_cast<char>(NativeMenuTextKey::Home);break;
+                    case VK_END:edit=static_cast<char>(NativeMenuTextKey::End);break;
+                    case VK_DELETE:edit=static_cast<char>(NativeMenuTextKey::Delete);break;
+                    case VK_ESCAPE:
+                        if((static_cast<std::uintptr_t>(second)&(std::uintptr_t{1}<<30))==0)edit=27;
+                        break;
+                    }
+                    if(edit && self->menuTextLength_<self->menuText_.size()) {
+                        self->menuText_[self->menuTextLength_++]=edit;
+                        self->input_->UseKeyboardPrompts();
+                    }
+                    return 0;
+                }
+            }
+            if(message==WM_MOUSEMOVE && self->lastMousePosition_!=second) {
+                if(self->menuPointerEnabled_) {
+                    if(self->replayInput_)self->pointerMoved_=true;
+                    else self->menuPointer_.Move({GET_X_LPARAM(second),GET_Y_LPARAM(second)});
+                    if(self->lastMousePosition_)self->OnMouseUse();
+                }
+                self->lastMousePosition_=second;
+            }
+            if(message==WM_LBUTTONDOWN && self->menuPointerEnabled_) {
+                self->OnMouseUse();
+                if(self->replayInput_)self->pointerClick_=true;
+                else {
+                    SetCapture(window);
+                    self->menuPointer_.Press({GET_X_LPARAM(second),GET_Y_LPARAM(second)},GetCapture()==window);
+                }
+            }
+            if((message==WM_LBUTTONUP || message==WM_CANCELMODE || message==WM_KILLFOCUS) &&
+               self->menuPointer_.captured) {
+                const POINT point=message==WM_LBUTTONUP?POINT{GET_X_LPARAM(second),GET_Y_LPARAM(second)}:
+                    self->menuPointer_.dragPoint;
+                self->menuPointer_.Release(point);
+                if(GetCapture()==window)ReleaseCapture();
+            }
+            if(message==WM_CAPTURECHANGED)self->menuPointer_.Release(self->menuPointer_.dragPoint);
+            if(message==WM_MOUSEWHEEL && self->menuPointerEnabled_) {
+                self->OnMouseUse();
+                self->wheelDelta_=std::clamp(self->wheelDelta_+GET_WHEEL_DELTA_WPARAM(first),-1200,1200);
+                return 0;
+            }
+            if(message==WM_SETCURSOR && LOWORD(second)==HTCLIENT && GetForegroundWindow()==window) {
+                SetCursor(self->MenuCursorVisible()?self->menuCursor_:nullptr);
+                return TRUE;
+            }
+            // A controller event pump can dispatch sent Win32 messages too.
+            if(self->HandleFullscreenShortcut(message,first,second))return 0;
+            const bool suppressMenu=(message==WM_SYSKEYUP || message==WM_KEYUP) && first==VK_MENU && self->suppressAltMenu_;
+            if(suppressMenu || message==WM_KILLFOCUS || (message==WM_ACTIVATEAPP && !first))self->suppressAltMenu_=false;
             // Posted input retains MSG.time through a blocked GPU submission.
             // Sent/nested focus messages have no matching queued MSG record.
             const auto* queued=self->dispatchInputMessage_;
             const bool matches=queued && queued->hwnd==window && queued->message==message &&
                 queued->wParam==first && queued->lParam==second;
             const auto time=matches?self->dispatchInputTime_:self->FrameTime();
-            if(self->input_->HandleWindowInput(message,first,second,time))return 0;
+            if(self->input_->HandleWindowInput(message,first,second,time) || suppressMenu)return 0;
         }
         if(self && !self->geometryChange_ && self->lockedOuterWidth_ && self->lockedOuterHeight_) {
             if(message==WM_GETMINMAXINFO) {
@@ -1218,6 +1715,12 @@ private:
         if(frameTimer_) {CancelWaitableTimer(frameTimer_);CloseHandle(frameTimer_);frameTimer_=nullptr;}
         if(window_ && IsWindow(window_))DestroyWindow(window_);
         window_=nullptr;
+        if(activeDisplayMode_) {
+            if(ChangeDisplaySettingsExW(displayModeDevice_.c_str(),&desktopMode_,nullptr,0,nullptr)!=DISP_CHANGE_SUCCESSFUL)
+                ChangeDisplaySettingsExW(displayModeDevice_.c_str(),nullptr,nullptr,0,nullptr);
+            activeDisplayMode_=false;
+        }
+        if(fileCursor_) {DestroyCursor(fileCursor_);fileCursor_=nullptr;}
         if(class_)UnregisterClassW(L"NFSHP2NativePAL",instance_);
         class_=0;
     }
@@ -1229,15 +1732,36 @@ private:
     HANDLE frameTimer_{};
     LONG lockedOuterWidth_{},lockedOuterHeight_{};
     bool geometryChange_{},displayChanged_{};
+    HCURSOR menuCursor_{},fileCursor_{};
+    ULONGLONG lastMouseUse_{};
+    std::optional<LPARAM> lastMousePosition_;
+    bool menuPointerEnabled_{},pointerMoved_{},pointerClick_{},cursorVisible_{},replayInput_{};
+    WindowsMenuPointer menuPointer_;
+    bool menuPointerHeld_{};
+    int wheelDelta_{},actualMasterVolume_{-1};
+    std::optional<std::int32_t> previewMasterVolume_;
+    bool menuTextInput_{};
+    std::array<char,64> menuText_{};
+    std::size_t menuTextLength_{};
     std::uint64_t presentationTimingEpoch_{};
     const GameTime* presentationClock_{}; // Borrowed until ApplicationRuntime finishes.
     NativeRefreshClock refreshClock_;
     std::uint64_t qpcFrequency_{},lastSourceQpc_{};
     const MSG* dispatchInputMessage_{};
     NativeFrameTiming::Clock::time_point dispatchInputTime_{};
+    std::function<void()> fullscreenToggle_;
+    std::array<bool,2> fullscreenShortcutKeys_{};
+    bool fullscreenTogglePending_{};
+    bool suppressAltMenu_{};
     // Last successful OS request, not a second saved gameplay/settings owner.
-    std::optional<std::array<int,4>> appliedDisplayRequest_;
+    std::optional<std::array<int,6>> appliedDisplayRequest_;
+    DEVMODEW desktopMode_{};
+    std::wstring displayModeDevice_;
+    bool activeDisplayMode_{};
     std::unique_ptr<WindowsInputDevice> input_;
+    bool racePresentation_{};
+    NativePcSettings pcSettings_;
+    std::filesystem::path pcFile_;
     std::unique_ptr<EcstasyVulkanDevice> graphics_;
     WorldAudioResult audioPumpResult_{WORLD_AUDIO_OK};
 };
@@ -1266,66 +1790,77 @@ int runNativeWindowsApplication(int argc,const wchar_t* const* argv)
         failureDirectory=executable.parent_path()/"Saves";
         std::vector<std::filesystem::path> arguments;
         for(int index=1;index<argc;++index)arguments.emplace_back(argv[index]);
-        const auto launch=resolveNativeProcessLaunch(executable,std::filesystem::current_path(),arguments);
+        auto launch=ParseNativeProcessLaunch(executable,std::filesystem::current_path(),arguments);
         failureDirectory=launch.profileDirectory;
-        if(launch.showHelp) {
-            const char* help="NFSHP2: run without options beside the original PAL game data.\n"
-                "  --zzdata [ZZDATA.BIN]  Read the original archive with adjacent ZDIR.BIN.\n"
-                "  --data <directory>    Use an extracted directory or an archive directory.\n"
-                "  --width N --height N --fullscreen --windowed --no-vsync\n"
-                "  --show-fps --hide-fps  Show or hide the independent in-game FPS counter.\n"
-                "  --debug               Enable the original pause debug tools and debug cameras.\n"
-                "  --unlock-all          Unlock official playable cars, tracks and events.\n"
-                "  --filter authored|bilinear|trilinear|anisotropic\n"
-                "  --anisotropy 2|4|8|16 --aa off|msaa2|msaa4|msaa8\n"
-                "  --skip-movies --play-movies --vsync --no-debug --no-unlock-all\n"
-                "  --configure           Configure and save settings without starting the game.\n"
-                "  --no-configurator     Start with saved PC settings and explicit CLI overrides.\n"
-                "Saves and settings are stored in Saves beside NFSHP2.exe.\n"
-                "Optional overrides: --profile <directory> --config <file>";
-            MessageBoxW(nullptr,NativeWideText(help).c_str(),L"NFSHP2 - Command line",MB_OK|MB_ICONINFORMATION);return 0;
-        }
+        const bool openConfigurator=launch.showHelp || launch.configureOnly || !launch.skipConfigurator;
         crash.Arm(launch.profileDirectory);
         crash.Event("launch.executable",executable.u8string().c_str());
-        crash.Event("launch.resources",launch.dataSource.u8string().c_str());
         crash.Event("launch.saves",launch.profileDirectory.u8string().c_str());
         operation="configure";
         crash.Event("startup.phase",operation);
         migrateNativeLaunchFiles(launch,executable);
-        const auto pcFile=launch.profileDirectory/"NFSHP2_pc.ini";
+        const auto pcFile=launch.profileDirectory/NativeSettingsFilename;
         NativePcSettings settings;
         try {settings=loadNativePcSettings(pcFile);}
         catch(const std::exception& error) {
-            if(launch.skipConfigurator && !launch.configureOnly)throw;
+            if(!openConfigurator)throw;
             MessageBoxW(nullptr,(NativeWideText(error.what())+L"\n\nDefaults are shown. The file is replaced only when you save.").c_str(),
                 L"NFSHP2 - PC Settings",MB_OK|MB_ICONWARNING);
         }
         applyNativeProcessOverrides(settings,launch);
         if(settings.antialiasing==NativeAntialiasing::Fxaa)settings.antialiasing=NativeAntialiasing::Off;
-        if(!launch.skipConfigurator || launch.configureOnly) {
+        std::unique_ptr<GameResources> files;
+        if(!launch.configureOnly) {
+            operation="open_resources";
+            if(!launch.showHelp)try {files=FindNativeGameData(executable,launch);}
+            catch(const std::runtime_error& error) {
+                if(!openConfigurator)throw;
+                crash.Event("launch.source_required",error.what());
+            }
+            if(!files) {
+                files=SelectNativeGameData(launch);
+                if(!files) {crash.Event("session.end","game-data selection cancelled",true);return 0;}
+            }
+        }
+        if(openConfigurator) {
+            operation="configure";
             NativeConfigurator configurator(settings,launch,pcFile);
             if(!configurator.Run()) {crash.Event("session.end","configurator closed",true);return 0;}
+        } else {
+            const auto monitor=NativeChooseMonitor(settings.monitorDevice);
+            const auto [nativeWidth,nativeHeight]=NativeWindowsMonitorResolution(monitor);
+            const bool oversizedWindow=!launch.width && !launch.height &&
+                (static_cast<DWORD>(settings.width)>nativeWidth || static_cast<DWORD>(settings.height)>nativeHeight);
+            if(oversizedWindow || settings.fullscreenSize.first) {
+                const auto modes=NativeWindowsResolutions(monitor);
+                if(std::find(modes.begin(),modes.end(),settings.fullscreenSize)==modes.end())settings.fullscreenSize={};
+                if(oversizedWindow) {
+                    const auto size=modes.empty()?std::make_pair(static_cast<int>(std::clamp<DWORD>(nativeWidth,320,16384)),
+                        static_cast<int>(std::clamp<DWORD>(nativeHeight,240,16384))):modes.back();
+                    settings.width=size.first;settings.height=size.second;
+                }
+            }
         }
+        crash.Event("launch.resources",launch.dataSource.u8string().c_str());
         if(!std::filesystem::exists(pcFile))saveNativePcSettings(pcFile,settings);
         char graphicsOptions[512]{};
         std::snprintf(graphicsOptions,sizeof(graphicsOptions),"width=%d height=%d fullscreen=%d vsync=%d aa=%d "
             "filter=%d anisotropy=%d debug=%d unlock_all=%d skip_movies=%d controllers=%d,%d vibration=%d show_fps=%d "
-            "traffic_vehicles=%d disable_catch_up=%d cockpit_view=%d",
+            "traffic_vehicles=%d disable_catch_up=%d cockpit_view=%d frame_limit=%d",
             settings.width,settings.height,settings.fullscreen?1:0,settings.vsync?1:0,static_cast<int>(settings.antialiasing),
             static_cast<int>(settings.textureFilter),settings.anisotropy,settings.debugTools?1:0,settings.unlockAll?1:0,
             settings.skipMovies?1:0,settings.input.controller[0],settings.input.controller[1],settings.input.vibration?1:0,settings.showFps?1:0,
-            settings.gameplay.trafficVehicles?1:0,settings.gameplay.disableCatchUp?1:0,settings.gameplay.cockpitView?1:0);
+            settings.gameplay.trafficVehicles?1:0,settings.gameplay.disableCatchUp?1:0,settings.gameplay.cockpitView?1:0,
+            settings.frameLimit);
         crash.Event("graphics.options",graphicsOptions);
         applicationConfigureTesting(settings.debugTools,settings.unlockAll);
         applicationShowFrameRate=settings.showFps;
         applicationNativeGameplay=settings.gameplay;
         configureNativeRenderSettings(settings.render);
-        operation="open_resources";
-        crash.Event("startup.phase",operation);
-        GameResources files(launch.dataSource,launch.archiveData ? GameResourceSource::ArchiveData:GameResourceSource::Auto);
         operation="create_windows_devices";
         crash.Event("startup.phase",operation);
-        WindowsApplicationHost host(settings,crash);ApplicationRuntime application(files,host,launch.profileDirectory,
+        const auto dataDirectory=std::filesystem::is_directory(launch.dataSource)?launch.dataSource:launch.dataSource.parent_path();
+        WindowsApplicationHost host(settings,crash,pcFile,dataDirectory);ApplicationRuntime application(*files,host,launch.profileDirectory,
             launch.profileSpecified?std::filesystem::path{}:executable.parent_path());
         try {
             host.BindPresentationClock(application.Clock());
@@ -1336,6 +1871,16 @@ int runNativeWindowsApplication(int argc,const wchar_t* const* argv)
             applicationShowFrameRate=settings.showFps;
             applicationLaunchOptions.skipMovies=settings.skipMovies?1:0;
             application.SetDisplayOptions(settings.width,settings.height,settings.fullscreen,settings.vsync);
+            host.BindFullscreenToggle([&] {
+                const auto display=application.Frontend().nativeDisplay;
+                const bool fullscreen=!display.fullscreen;
+                auto saved=*host.PcSettings();
+                saved.fullscreen=fullscreen;
+                std::string error;
+                if(host.SavePcSettings(saved,error))
+                    application.SetDisplayOptions(display.width,display.height,fullscreen,display.vsync);
+                else crash.Event("display.mode_save_failed",error.c_str());
+            });
             operation="run_application";
             crash.Event("startup.phase",operation);
             for(;;) {

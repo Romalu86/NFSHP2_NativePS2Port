@@ -1,3 +1,22 @@
+#include <windows.h>
 #include "NativeAppResources.h"
 
 IDI_NFSHP2_APPLICATION ICON "NFSHP2.ico"
+IDC_NFSHP2_MENU CURSOR "MenuCursor.cur"
+
+IDD_NFSHP2_GAME_DATA DIALOGEX 0, 0, 344, 180
+STYLE DS_SETFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Need for Speed Hot Pursuit 2"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Choose your game data", -1, 12, 12, 320, 12
+    DEFPUSHBUTTON "Game archives...", IDC_NFSHP2_PICK_ARCHIVE, 12, 33, 114, 22
+    LTEXT "ZZDATA.BIN and its matching ZDIR.BIN", -1, 137, 39, 195, 12
+    PUSHBUTTON "Extracted folder...", IDC_NFSHP2_PICK_EXTRACTED, 12, 61, 114, 22
+    LTEXT "Folder containing the extracted game files", -1, 137, 67, 195, 12
+    PUSHBUTTON "ISO image...", IDC_NFSHP2_PICK_ISO, 12, 89, 114, 22
+    LTEXT "Original PlayStation 2 disc image", -1, 137, 95, 195, 12
+    LTEXT "Game data was tested with the original PS2 releases SLES_507.31 and SLUS_203.62.", IDC_NFSHP2_DATA_NOTICE, 12, 121, 320, 21
+    LTEXT "", IDC_NFSHP2_DATA_STATUS, 12, 149, 250, 23
+    PUSHBUTTON "Cancel", IDCANCEL, 268, 149, 64, 21
+END

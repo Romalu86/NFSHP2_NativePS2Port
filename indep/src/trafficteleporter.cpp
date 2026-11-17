@@ -122,6 +122,62 @@ int32_t trafficSchedulerCanPlaceCar(TrafficScheduler* scheduler,const CarRecover
     return !trafficSchedulerTooCloseDistance(scheduler,selection->pose->routeDistance,excluded,includeInactive);
 }
 
+bool trafficSchedulerFitsRestoredVehicle(const TrafficScheduler& scheduler,
+    const CarRecoveryPose& pose,const hp2::CarDefinition& car)
+{
+    if(!hp2::IsRestoredTrafficModel(car.modelCode))return true;
+    const auto& bindings=hp2::WorldCarBindings(*scheduler.bindings.world);
+    const auto key=hashString((car.baseName+"_A").c_str());
+    const EditorMarkerSolid* body=nullptr;
+    const auto& models=bindings.render->resources->Models();
+    for(auto* catalogue=&models;catalogue && !body;catalogue=catalogue->nextCatalogue)
+        for(std::size_t index=0;index<catalogue->solidCount;++index)
+            if(catalogue->solids[index].key==key) {body=&catalogue->solids[index];break;}
+    if(!body)return false;
+
+    // The three restored vehicles use the same driver and placement code
+    // as stock traffic. Screen proposed poses before constructing or moving
+    // a live car: the generic route point only describes the road centre.
+    const auto halfWidth=std::max(std::fabs(body->minimum[1]),std::fabs(body->maximum[1]));
+    if(pose.halfWidths[0]<halfWidth || pose.halfWidths[1]<halfWidth)return false;
+    const auto halfLength=std::max(std::fabs(body->minimum[0]),std::fabs(body->maximum[0]));
+    const auto groundToOrigin=car.wheels[3].radius-car.wheels[3].position[2];
+    const auto roofHeight=body->maximum[2]+groundToOrigin;
+    if(!std::isfinite(halfLength) || !std::isfinite(halfWidth) ||
+        !std::isfinite(roofHeight) || roofHeight<=0.0f)return false;
+    TerrainSurface terrain{};
+    terrainSurfaceInitialize(&terrain,bindings.topology);
+    const std::unique_ptr<TerrainSurface,decltype(&terrainSurfaceDispose)> releaseTerrain(&terrain,terrainSurfaceDispose);
+    terrainSurfaceUpdate(&terrain,pose.position,std::hypot(halfLength,halfWidth)+1.0f,nullptr);
+    const auto hit=[&](const float first[4],const float second[4],std::uint8_t flags) {
+        for(std::size_t index=terrain.groundCount;index<terrain.polygonCount;++index) {
+            const auto* polygon=terrain.polygons[index];
+            if((polygon->flags&flags) && terrainPolygonIntersectSegment(polygon,first,second,nullptr))return true;
+        }
+        return false;
+    };
+    for(const auto& wheel:car.wheels) {
+        float point[4],roof[4];
+        driverRoadPointPosition(&pose,point,wheel.position[0],-wheel.position[1]);
+        terrain.lastGround=nullptr; // Select the ground layer at each wheel's own height.
+        bool found=false;
+        const float ground=terrainSurfaceElevation(&terrain,point,nullptr,nullptr,&found);
+        if(!found || std::fabs(ground-point[2])>1.0f)return false;
+        std::copy_n(point,4,roof);
+        point[2]=ground+0.1f;roof[2]=ground+roofHeight;
+        if(hit(point,roof,8u))return false;
+    }
+    float corners[4][4];
+    driverRoadPointPosition(&pose,corners[0],body->minimum[0],-halfWidth);
+    driverRoadPointPosition(&pose,corners[1],body->maximum[0],-halfWidth);
+    driverRoadPointPosition(&pose,corners[2],body->maximum[0],halfWidth);
+    driverRoadPointPosition(&pose,corners[3],body->minimum[0],halfWidth);
+    for(auto& corner:corners)corner[2]+=roofHeight*0.5f;
+    for(std::size_t index=0;index<4;++index)
+        if(hit(corners[index],corners[(index+1)%4],2u))return false;
+    return !hit(corners[0],corners[2],2u) && !hit(corners[1],corners[3],2u);
+}
+
 Car* trafficSchedulerRandomPlayerCar(TrafficScheduler* scheduler)
 {
     auto* players=scheduler->bindings.players;
@@ -153,6 +209,7 @@ WorldServicesResult trafficSchedulerTryTeleportCar(TrafficScheduler* scheduler,C
     Car* reference=trafficSchedulerRandomPlayerCar(scheduler);
     auto* movement=Movement(car);
     const auto* referenceMovement=Movement(reference);
+    const auto& definition=scheduler->carInfo->Car(static_cast<size_t>(movement->info.modelCode));
     const TrackRoute* route=scheduler->bindings.race->route;
     const float initialDelta=trackRouteDistanceDifference(route,movement->routeLocation.distance,
         referenceMovement->routeLocation.distance);
@@ -163,10 +220,11 @@ WorldServicesResult trafficSchedulerTryTeleportCar(TrafficScheduler* scheduler,C
     if (carRecoveryFindFollowingBranches(scheduler->bindings.road,&next,1,
         selection.group,selection.pose,250.0f,forward)!=1) return WORLD_SERVICES_OK;
     selection=next;
-    for (;;) {
+    for (unsigned attempt=0;;++attempt) {
         const float delta=trackRouteDistanceDifference(route,selection.pose->routeDistance,
             referenceMovement->routeLocation.distance);
-        if (trafficSchedulerCanPlaceCar(scheduler,&selection,car,0)) {
+        if (trafficSchedulerCanPlaceCar(scheduler,&selection,car,0) &&
+            trafficSchedulerFitsRestoredVehicle(*scheduler,*selection.pose,definition)) {
             if (0.0f<initialDelta && initialDelta<delta) return WORLD_SERVICES_OK;
             if (delta<0.0f) return WORLD_SERVICES_OK;
             carMovementRecover(movement,selection.group,selection.pose,24.58650016784668f,1.0f,0,0);
@@ -186,6 +244,7 @@ WorldServicesResult trafficSchedulerTryTeleportCar(TrafficScheduler* scheduler,C
             return WORLD_SERVICES_OK;
         }
         if (scheduler->result!=WORLD_SERVICES_OK) return scheduler->result;
+        if(hp2::IsRestoredTrafficModel(definition.modelCode) && attempt==99)return WORLD_SERVICES_OK;
         if (carRecoveryFindFollowingBranches(scheduler->bindings.road,&next,1,
             selection.group,selection.pose,50.0f,forward)!=1) return WORLD_SERVICES_OK;
         selection=next;
@@ -271,24 +330,27 @@ Car* TrafficPlaceNewCar(TrafficScheduler* scheduler,RaceDriverInfo& driver)
     TrackRouteLocation coordinate;trackRouteLocationInitialize(&coordinate);
     const int32_t forward=trafficSchedulerForwardsOrBackwards(scheduler);
     if(!scheduler->forwardTotals.back() || !scheduler->reverseTotals.back())return nullptr;
+    const auto& definition=scheduler->carInfo->Car(static_cast<size_t>(driver.appearance.modelCode));
     scheduler->result=WORLD_SERVICES_OK;
     for(unsigned attempt=0;attempt<100;++attempt) {
         const auto selected=trafficSchedulerPickRandomPoint(*scheduler,forward);
-        if(!trafficSchedulerCanPlaceCar(scheduler,&selected,nullptr,1)) {
+        if(!trafficSchedulerCanPlaceCar(scheduler,&selected,nullptr,1) ||
+            !trafficSchedulerFitsRestoredVehicle(*scheduler,*selected.pose,definition)) {
             Require(scheduler->result==WORLD_SERVICES_OK,"Traffic placement owner failed");
             continue;
         }
         trackRouteUpdateLocation(scheduler->bindings.race->route,&coordinate,selected.pose->position);
         const uint16_t heading=vectorAtan2Angle(selected.pose->direction[0],selected.pose->direction[1]);
         const float position[3]={selected.pose->position[0],selected.pose->position[1],selected.pose->position[2]};
-        const auto& definition=scheduler->carInfo->Car(static_cast<size_t>(driver.appearance.modelCode));
         driver.appearance.skinNumber=static_cast<int8_t>(trafficSchedulerPickRandomSkin(scheduler,definition));
         std::unique_ptr<Car> car(WorldCreateCar(*scheduler->bindings.world,driver,position,heading,
             selected.pose->routeDistance));
         Require(carMovementSetMode(car->Movement(),0)==CAR_MOVEMENT_OK,"Traffic NullMover initialization failed");
         Require(carDriverChange(car->Driver(),car.get(),CAR_DRIVER_TRAFFIC)==CAR_DRIVER_OK,
             "Traffic controller construction failed");
-        driverAISetRoad(&car->Driver()->owner.traffic->base,selected.group,selected.pose);
+        auto& controller=car->Driver()->owner.traffic->base;
+        driverAISetRoad(&controller,selected.group,selected.pose);
+        if(hp2::IsRestoredTrafficModel(definition.modelCode) && controller.result!=CAR_DRIVER_OK)continue;
         car->Movement()->bindings.ownerMotion->actionEnabled=0;
         return car.release();
     }
@@ -318,7 +380,12 @@ WorldServicesResult trafficSchedulerUpdate(TrafficScheduler* scheduler,float ela
         Car* car=world->carTable[world->thirdGroupEnd+index];
         if (!car || !car->movement || !car->driverInfo)
             return scheduler->result=WORLD_SERVICES_INVALID_BINDING;
-        if (!trafficSchedulerCheckVisibility(scheduler,Movement(car)->routeLocation.distance)) {
+        const auto* movement=Movement(car);
+        // Keep the restored BUS on its road for this race. The original
+        // route-distance test alone cannot tell when its relocation is seen.
+        constexpr int32_t busModelCode=52;
+        if (movement->info.modelCode!=busModelCode &&
+            !trafficSchedulerCheckVisibility(scheduler,movement->routeLocation.distance)) {
             const auto result=trafficSchedulerTryTeleportCar(scheduler,car);
             scheduler->cursor=index;
             return result;

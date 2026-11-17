@@ -12,6 +12,7 @@
 #include <memory>
 #include <list>
 #include <string>
+#include <string_view>
 
 namespace hp2 { class GameResources; }
 struct CarSoundBindings;
@@ -338,6 +339,8 @@ public:
     // Owner-thread API. Open consumes the retained INITIALIZE operation;
     // Pump applies the same queue. Neither method exists as a Linux stub.
     WorldAudioResult OpenWindowsDevice();
+    void SetWindowsRadioController(std::wstring_view container,float gain);
+    WorldAudioResult SetWindowsMasterVolume(float gain);
     WorldAudioResult PumpWindowsDevice(size_t maximumOperations=256);
     WorldAudioResult CloseWindowsDevice();
     const WindowsAudioFailure& WindowsFailure() const noexcept { return windowsFailure_; }

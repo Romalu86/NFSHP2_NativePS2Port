@@ -10,6 +10,7 @@
 #include "Language.hpp"
 #include "FEAnim.hpp"
 #include "Texture.hpp"
+#include "Flags.hpp"
 #include "bware/inc/bMath.hpp"
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/eMath.hpp"
@@ -712,7 +713,8 @@ void TrackRecordDisplayer::SetCurrentTrack(SelectableTrack* track)
         char text[GAME_TIMER_TEXT_CAPACITY];
         gameTimerPrintToString(&ticks,text,0,&ui->language->currentLanguage);
         resources.SetGroupVisibility(screenKey,0xabcc6035u,1);
-        resources.Printf(screenKey,0xf3363be5u,"%s %s",text,name);
+        const auto label=std::string(text)+" "+name;
+        resources.SetFittedText(screenKey,0xf3363be5u,ui->language,label.c_str());
     } else resources.SetGroupVisibility(screenKey,0xabcc6035u,0);
     records.clear();
     if (!track->baseInfo->routeKind) {
@@ -745,8 +747,8 @@ void TrackRecordDisplayer::ShowCurrentRecord()
     if (!record.time->ticks || record.time->ticks==INT32_MAX)return;
     char text[GAME_TIMER_TEXT_CAPACITY];
     gameTimerPrintToString(&record.time->ticks,text,0,&ui->language->currentLanguage);
-    resources.Printf(screenKey,0xae5a12ccu,"%s %s",text,
-        frontend->RecordPlayerName(record.time->playerNameIndex));
+    const auto label=std::string(text)+" "+frontend->RecordPlayerName(record.time->playerNameIndex);
+    resources.SetFittedText(screenKey,0xae5a12ccu,ui->language,label.c_str());
     if (record.laps>=2) {
         const auto* format=ui->language->GetString(0xd6f1);
         Require(format,"Track record lap caption is missing from the language resource");
@@ -911,8 +913,8 @@ std::int32_t SelectableTrackManager::GetTrackStatus(const FrontendPlayerManager&
     const TrackInfoResources& tracks,const EventTreeResources& events,
     std::int32_t track,std::int32_t direction) const
 {
-    const auto locked=IsTrackUnlocked(events,track,direction) ? 0 : 2;
-    return IsTrackUnavailable(frontend,tracks,track,direction) ? 1 : locked;
+    if(IsTrackUnavailable(frontend,tracks,track,direction))return 1;
+    return IsTrackUnlocked(events,track,direction) ? 0 : 2;
 }
 
 void SelectableTrackManager::BuildList(const FrontendPlayerManager& frontend,

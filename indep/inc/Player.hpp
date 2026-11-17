@@ -140,7 +140,7 @@ extern float playerSecondLapColor[4];
 void carFramePlayerHudStartWrongWay(CarFramePlayerState* player);
 void carFramePlayerHudDoAnimations(CarFramePlayerState* player);
 void carFramePlayerRenderTrackMap(CarFramePlayerState* player);
-void carFramePlayerSetTrackMapMode(CarFramePlayerState* player,int32_t mode);
+void carFramePlayerSetTrackMapMode(CarFramePlayerState* player,int32_t mode,bool preview=false);
 uint32_t carFramePlayerDetermineHudFeatures(CarFramePlayerState* player);
 uint32_t carFramePlayerGetGaugeMode(const CarFramePlayerState* player);
 int32_t carFramePlayerShouldShowBustedText(const CarFramePlayerState* player);

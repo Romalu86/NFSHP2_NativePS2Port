@@ -8,9 +8,9 @@
 #include <stdint.h>
 typedef struct CarMotionState CarMotionState;
 struct PursuitManager;
+struct RaceParameters;
 typedef struct CarRecoveryPolicy {
-    int32_t registryGuard;
-    int32_t positiveEntryGate;
+    const struct RaceParameters *parameters;
     const struct PursuitManager *pursuit;
 } CarRecoveryPolicy;
 #include "CarState.hpp"

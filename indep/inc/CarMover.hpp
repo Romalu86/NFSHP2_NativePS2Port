@@ -65,6 +65,7 @@ float beltMoverRelativePosition(BeltMover* mover,const float position[4],float p
                                  float difference[4],float tangent[4]);
 float beltMoverSlope(BeltMover* mover);
 float beltMoverAvailableAcceleration(BeltMover* mover);
+float beltMoverWorldSpeedToParameter(float worldSpeed,const float tangent[4]);
 void beltMoverRecalculate(BeltMover* mover);
 void beltMoverActivate(BeltMover* mover);
 float beltMoverLateralGrip(BeltMover* mover,float acceleration);

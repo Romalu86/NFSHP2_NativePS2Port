@@ -405,6 +405,25 @@ void ReplayScreen::Update()
     if(!HasCameraMover())ChangeCameraMover();
     if(ShouldWeBeWatchingNis()!=(nisCamera_!=nullptr))ChangeCameraMover();
 }
+void ReplayScreen::HandlePointer(float x,float y,bool pressed,bool held)
+{
+    if(pressed || !held)pointerSeekEvent_=0;
+    if(services_.frontend->screens->help->IsActive()) {if(pressed)JoyHandler(0,106,1);return;}
+    if(hidden_) {if(pressed)JoyHandler(0,107,1);return;}
+    if(y<392.0f || y>455.0f)return;
+    constexpr std::array<std::pair<float,int>,9> controls{{{27.5f,105},{75.5f,101},{119.0f,103},{165.0f,100},
+        {208.5f,104},{253.0f,106},{295.0f,102},{339.5f,107},{386.0f,99}}};
+    const auto now=Clock().realTimer;
+    for(const auto& [center,event]:controls) {
+        if(std::abs(x-center)>18.0f)continue;
+        const bool repeat=held && pointerSeekEvent_==event && Difference(now,lastPointerSeekTicks_)>=1200;
+        if(!pressed && !repeat)return;
+        JoyHandler(0,event,1);
+        if(event==101 || event==102) {pointerSeekEvent_=event;lastPointerSeekTicks_=now;}
+        return;
+    }
+}
+
 void ReplayScreen::JoyHandlerBridge(std::int32_t port,std::int32_t event,std::uint8_t value,ReplayScreen* owner)
 {
     Require(owner,"ReplayScreen callback has no owner");owner->JoyHandler(port,event,value);

@@ -10,10 +10,12 @@
 
 namespace hp2 {class TextureMetadataStorage;}
 namespace hp2::movie {class MoviePlayer;}
+namespace hp2::platform {enum class NativePromptDevice : std::uint8_t;}
 namespace hp2::frontend {
 
 struct FlailerScreenResource;
 struct FlailerStrip;
+struct FlailerBitmapChunk;
 class FlailerResources;
 class FlailerStripPool;
 class LanguageManager;
@@ -59,6 +61,7 @@ struct FlailerObjectChunk {
     std::uint8_t visible{};
     std::uint8_t authoredFlags{};
     std::uint8_t updateKind{};
+    EcstasyUiPlacement uiPlacement{EcstasyUiPlacement::OriginalCanvas};
     float topLeftX{};
     float topLeftY{};
     float scaleX{1.0f};
@@ -91,6 +94,7 @@ struct FlailerTextChunk : FlailerObjectChunk {
     const char* text{};
     std::uint32_t languageId{};
     std::vector<char> ownedText;
+    FlailerBitmapChunk* hudRow{};
 
     void SetFormatOptions(std::int32_t options);
     void ClearFormatOptions(std::int32_t options);
@@ -103,7 +107,11 @@ struct FlailerTextChunk : FlailerObjectChunk {
     void CopyAttributesFrom(const FlailerTextChunk& source);
     void RenderCharacter(const tTTGlyph& glyph,const Font& font,const float position[3],
         const float minimum[2],const float maximum[2],float alphaScale);
-    float RenderHelpCharacter(FlailerResources& resources,float x,float y,std::uint8_t character,float alphaScale);
+    float nativeFitBaseX{},nativeFitBaseY{};
+    bool nativePhysicalButtonLabel{};
+    platform::NativePromptDevice nativePhysicalButtonDevice{};
+    float RenderHelpCharacter(FlailerResources& resources,float x,float y,std::uint8_t character,
+        float alphaScale,const char* labelOverride=nullptr);
     void Render(FlailerResources& resources,const LanguageManager* language,
         const float* minimum,const float* maximum,float alphaScale);
     void RenderStringFixedWidth(FlailerResources& resources,const char* first,const char* end,float alphaScale);
@@ -112,6 +120,7 @@ struct FlailerTextChunk : FlailerObjectChunk {
 };
 
 struct FlailerBitmapChunk : FlailerObjectChunk {
+    std::uint32_t nativeSliderItem{};
     std::uint32_t textureKey{};
     const EditorMarkerTexture* texture{};
     // Retains the same dynamic TexturePack metadata if this bitmap borrows
@@ -198,7 +207,8 @@ struct FlailerRenderManager {
     void AddFlailerStrip(FlailerObjectChunk& object);
     // Native ePoly submission to the same retained frontend strip owner.
     void SubmitPolygon(FlailerStripPool& pool,const EditorMarkerTexture* texture,
-        const FlailerPoly& polygon,std::int32_t depth);
+        const FlailerPoly& polygon,std::int32_t depth,
+        EcstasyUiPlacement placement=EcstasyUiPlacement::OriginalCanvas);
     void RenderTextIntoRectangle(FlailerResources& resources,const char* message,FlailerTextChunk& text,
         const float minimum[2],const float maximum[2],float alphaScale);
     void RenderTextIntoRectangle(FlailerResources& resources,std::uint32_t screenKey,

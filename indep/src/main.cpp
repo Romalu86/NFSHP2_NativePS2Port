@@ -26,6 +26,8 @@
 #include "indep/inc/CarLoader.hpp"
 #include "indep/inc/RealDriver.hpp"
 #include "indep/inc/AICarController.hpp"
+#include "indep/inc/CarMover.hpp"
+#include "indep/inc/MellowMover.hpp"
 #include "indep/inc/TrafficDriver.hpp"
 #include "indep/inc/AIPlan.hpp"
 #include "indep/inc/Player.hpp"
@@ -75,7 +77,7 @@ void applicationSeedRandomNumber(ReplayIntegerLog& log)
     (void)vectorRandomSeed(seed,&vectorDefaultRandomState);
 }
 
-// PAL12EDA0..12EE2C. The PC file adapter accepts readable config.ini and
+// PAL12EDA0..12EE2C. The PC file adapter accepts a readable track override and
 // read-only legacy config.bin. Its one selected word and Joylog order are
 // unchanged; malformed input fails before the original cell is published.
 void applicationLoadConfig(const std::filesystem::path& filename,ReplayIntegerLog& log)
@@ -214,6 +216,7 @@ void RequireAudio(WorldAudioResult result,const char* operation,const bSound* so
 struct ApplicationRuntime::Storage {
     platform::NativeDurationStatistics sourceUpdateTiming,presentationTiming;
     double deferredPresentationCpuMilliseconds{},deferredCaptureMilliseconds{},deferredSealMilliseconds{};
+    bool pendingFrameResources{};
     std::uint64_t deferredLogicalUpdates{},deferredSceneCaptures{};
     NativeFrameTiming frameTiming;
     NativeSimulationClock simulationClock;
@@ -359,7 +362,7 @@ struct ApplicationRuntime::Storage {
             "position=(%.3f,%.3f,%.3f) speed=%.3f restoring=%d recording=%d exhausted=%d desynchronized=%d "
             "source_sync_policy=%d source_samples=%u source_mismatches=%u first_source_mismatch_loop=%d "
             "application_fps=%.2f frame_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f gpu_available=%d "
-            "catch_up=%d disable_catch_up_pref=%d",
+            "catch_up=%d disable_catch_up_pref=%d opponent_difficulty=%d",
             clock.worldLoopCounter,clock.worldTimer,parameters.selectedScenario,world.totalCars,state[5],movement?movement->mode:-1,
             static_cast<double>(car?car->position[0]:0.0f),static_cast<double>(car?car->position[1]:0.0f),
             static_cast<double>(car?car->position[2]:0.0f),static_cast<double>(vehicle?vehicle->speed:0.0f),
@@ -371,9 +374,168 @@ struct ApplicationRuntime::Storage {
             applicationFrameTiming.framesPerSecond,applicationFrameTiming.frameMilliseconds,
             applicationFrameTiming.cpuMilliseconds,applicationFrameTiming.gpuMilliseconds,
             applicationFrameTiming.gpuTimeAvailable?1:0,parameters.relativePaceEnabled,
-            applicationNativeGameplay.disableCatchUp?1:0);
+            applicationNativeGameplay.disableCatchUp?1:0,parameters.opponentDifficulty);
         if(demoReplay.active)demoReplay.RecordSessionEvent("demo.status",nullptr,detail);
         else host.RecordSessionEvent("gameplay.status",detail);
+        if(!demoReplay.active) {
+            // One periodic record from the actual World/Car/Driver owners.
+            // Runtime evidence separates a wrong Catch Up preference from an
+            // excessive road-speed target or physical performance multiplier.
+            std::int32_t opponents=0,fullThrottleTransitions=0,fastestIndex=-1;
+            float fastestSpeed=-1.0f,fastestTarget=0.0f,fastestScale=1.0f;
+            float fastestLimit=0.0f,playerSpeed=0.0f;
+            std::int32_t fastestMode=-1,fastestDelay=0;
+            for(std::int32_t index=0;index<world.totalCars;++index) {
+                auto* candidate=world.carTable[index];
+                if(!candidate)continue;
+                const auto* candidateMovement=candidate->Movement();
+                if(!candidateMovement || !candidateMovement->bindings.state)continue;
+                if(candidateMovement->bindings.player) {
+                    playerSpeed=std::max(playerSpeed,candidateMovement->bindings.state->speed);
+                    continue;
+                }
+                const auto* candidateDriver=candidate->Driver();
+                if(!candidateDriver || candidateDriver->kind!=CAR_DRIVER_AI || !candidateDriver->owner.ai)continue;
+                ++opponents;
+                const auto& opponentAI=candidateDriver->owner.ai->base;
+                const float target=candidateDriver->owner.ai->input.targetSpeed;
+                if(target>=99999.0f)++fullThrottleTransitions;
+                const float speed=candidateMovement->bindings.state->speed;
+                if(speed>fastestSpeed) {
+                    fastestSpeed=speed;fastestTarget=target;
+                    fastestScale=candidateMovement->bindings.state->performanceScale;
+                    fastestLimit=candidateMovement->bindings.info ?
+                        candidateMovement->bindings.info->forwardSpeedLimit:0.0f;
+                    fastestMode=candidateMovement->mode;
+                    fastestDelay=opponentAI.connectionDelayTicks;fastestIndex=index;
+                }
+            }
+            std::snprintf(detail,sizeof(detail),
+                "world_loop=%d catch_up=%d disabled=%d opponents=%d player_kmh=%.1f "
+                "fastest_slot=%d fastest_kmh=%.1f fastest_target_mps=%.2f "
+                "fastest_perf=%.4f fastest_limit_mph=%.1f fastest_mover=%d "
+                "fastest_connection_ticks=%d unbounded_targets=%d",
+                clock.worldLoopCounter,parameters.relativePaceEnabled,
+                applicationNativeGameplay.disableCatchUp?1:0,opponents,
+                static_cast<double>(playerSpeed*3.6f),fastestIndex,
+                static_cast<double>(std::max(0.0f,fastestSpeed)*3.6f),
+                static_cast<double>(fastestTarget),static_cast<double>(fastestScale),
+                static_cast<double>(fastestLimit),fastestMode,fastestDelay,fullThrottleTransitions);
+            host.RecordSessionEvent("gameplay.ai_pacing",detail);
+            // All race opponents, not only whichever car happens to be
+            // fastest at this sample. A mode transition can otherwise
+            // disguise a BeltMover velocity discontinuity as a MellowMover
+            // motor problem. This instrumentation is read-only.
+            for(std::int32_t index=0;index<world.totalCars;++index) {
+                Car* other=world.carTable[index];
+                if(!other)continue;
+                const CarMovement* mover=other->Movement();
+                const CarDriver* driver=other->Driver();
+                if(!mover||!mover->bindings.state||!mover->bindings.controls||
+                   mover->bindings.player||!driver||driver->kind!=CAR_DRIVER_AI||
+                   !driver->owner.ai)continue;
+                const auto& vehicleState=*mover->bindings.state;
+                const auto& controls=*mover->bindings.controls;
+                const auto& ai=driver->owner.ai->base;
+                const float beltParameter=mover->mode==6 && mover->belt ? mover->belt->parameterScale:0.0f;
+                const float beltMotion=mover->mode==6 && mover->belt ? mover->belt->velocityParameter:0.0f;
+                const float beltAcceleration=mover->mode==6 && mover->belt ? mover->belt->accelerationParameter:0.0f;
+                const int beltPoints=mover->mode==6 && mover->belt ? mover->belt->path.count:0;
+                const float bodyLimit=mover->mode==4 && mover->mellow && mover->mellow->body ?
+                    mover->mellow->body->forwardSpeedLimit:0.0f;
+                const float bodyScale=mover->mode==4 && mover->mellow && mover->mellow->body ?
+                    mover->mellow->body->speedLimitScale:0.0f;
+                const auto* owner=mover->bindings.owner;
+                const auto* motion=mover->bindings.ownerMotion;
+                const auto* shape=motion && motion->collision ? motion->collision->shape : nullptr;
+                const auto* impact=shape && shape->contactCount>0 && simulation->collisions ?
+                    collisionShapeContactAt(simulation->collisions,shape,0) : nullptr;
+                const auto* pair=impact ? impact->pair : nullptr;
+                const auto* counterpart=pair ?
+                    (pair->first->shape==shape ? pair->second : pair->first) : nullptr;
+                const auto* collider=counterpart ? counterpart->shape : nullptr;
+                const auto* polygon=counterpart ? counterpart->polygon : nullptr;
+                const auto& aiInput=driver->owner.ai->input;
+                std::snprintf(detail,sizeof(detail),
+                    "world_loop=%d slot=%d mode=%d action=%d kmh=%.2f forward_mps=%.3f target_mps=%.3f "
+                    "performance=%.4f gas=%.4f brake=%.4f handbrake=%.4f contacts=%d%d%d%d "
+                    "velocity=(%.3f,%.3f,%.3f) path_points=%d path_length=%.3f "
+                    "belt_param_scale=%.5f belt_velocity_param=%.5f belt_accel_param=%.5f "
+                    "body_limit_mph=%.1f body_limit_scale=%.4f connection_ticks=%d "
+                    "profile=%d position=(%.2f,%.2f,%.2f) gear=%d steering=%d "
+                    "impact_count=%d last_recovery_ticks=%d target_xy=(%.2f,%.2f) "
+                    "first_impact_kind=%d first_impact_id=%d first_impact_xy=(%.2f,%.2f) terrain_material=%d terrain_flags=%u",
+                    clock.worldLoopCounter,index,mover->mode,ai.action?ai.action->kind:-1,
+                    static_cast<double>(vehicleState.speed*3.6f),static_cast<double>(vehicleState.forwardSpeed),
+                    static_cast<double>(aiInput.targetSpeed),
+                    static_cast<double>(vehicleState.performanceScale),
+                    static_cast<double>(controls.throttle),static_cast<double>(controls.brake),
+                    static_cast<double>(controls.handbrake),
+                    vehicleState.wheelContact[0]!=0,vehicleState.wheelContact[1]!=0,
+                    vehicleState.wheelContact[2]!=0,vehicleState.wheelContact[3]!=0,
+                    static_cast<double>(vehicleState.velocity[0]),static_cast<double>(vehicleState.velocity[1]),
+                    static_cast<double>(vehicleState.velocity[2]),beltPoints,
+                    static_cast<double>(aiInput.command.length),
+                    static_cast<double>(beltParameter),static_cast<double>(beltMotion),
+                    static_cast<double>(beltAcceleration),static_cast<double>(bodyLimit),
+                    static_cast<double>(bodyScale),ai.connectionDelayTicks,
+                    owner && owner->driverInfo ? static_cast<int>(owner->driverInfo->behaviorProfile) : -1,
+                    static_cast<double>(vehicleState.position[0]),static_cast<double>(vehicleState.position[1]),
+                    static_cast<double>(vehicleState.position[2]),vehicleState.gear,
+                    static_cast<int>(static_cast<std::int16_t>(controls.steeringAngle)),
+                    shape ? static_cast<int>(shape->contactCount) : 0,ai.lastRecoveryActionTicks,
+                    static_cast<double>(aiInput.targetPoint[0]),static_cast<double>(aiInput.targetPoint[1]),
+                    collider ? static_cast<int>(collider->kind) : -1,collider ? static_cast<int>(collider->id) : -1,
+                    static_cast<double>(impact ? impact->point[0] : 0.0f),
+                    static_cast<double>(impact ? impact->point[1] : 0.0f),
+                    polygon ? static_cast<int>(polygon->materialIndex) : -1,
+                    polygon ? static_cast<unsigned>(polygon->flags) : 0u);
+                host.RecordSessionEvent("gameplay.ai_vehicle",detail);
+            }
+        }
+        if(resources) {
+            // PAL afxInit has one particle/group pool for world and frame
+            // effects. Sum both owners before judging capacity, otherwise
+            // a seemingly empty instance may hide shared-pool exhaustion.
+            auto& fx=resources->FX();
+            const auto& worldFX=fx.Particles();
+            const auto& frameFX=fx.FrameParticles();
+            const auto& requests=fx.Emitters();
+            const auto particles=std::uint64_t(worldFX.particleCount)+frameFX.particleCount;
+            const auto groups=std::uint64_t(worldFX.groupCount)+frameFX.groupCount;
+            std::snprintf(detail,sizeof(detail),
+                "world_loop=%d particles=%llu/%zu groups=%llu/%zu "
+                "emitters_world=%u emitters_frame=%u active_requests=%zu "
+                "dropped_particles_world=%llu dropped_particles_frame=%llu "
+                "dropped_groups_world=%llu dropped_groups_frame=%llu "
+                "dropped_requests=%zu dropped_auto_emitters=%zu dropped_frame_emitters=%llu "
+                "outside_interest_world=%llu outside_interest_frame=%llu",
+                clock.worldLoopCounter,
+                static_cast<unsigned long long>(particles),worldFX.particleCapacity,
+                static_cast<unsigned long long>(groups),worldFX.groupCapacity,
+                worldFX.emitterCount,frameFX.emitterCount,requests.requestCount,
+                static_cast<unsigned long long>(worldFX.droppedParticles),
+                static_cast<unsigned long long>(frameFX.droppedParticles),
+                static_cast<unsigned long long>(worldFX.droppedGroups),
+                static_cast<unsigned long long>(frameFX.droppedGroups),
+                requests.droppedRequests,
+                requests.droppedAutoEmitters,
+                static_cast<unsigned long long>(fx.FrameEmitterDrops()),
+                static_cast<unsigned long long>(worldFX.outOfInterestEmissions),
+                static_cast<unsigned long long>(frameFX.outOfInterestEmissions));
+            host.RecordSessionEvent("gameplay.fx_pools",detail);
+            if(worldFX.droppedParticles || worldFX.droppedGroups ||
+               frameFX.droppedParticles || frameFX.droppedGroups) {
+                std::snprintf(detail,sizeof(detail),
+                    "world_loop=%d world_particle=%08x/%d world_group=%08x/%d "
+                    "frame_particle=%08x/%d frame_group=%08x/%d",
+                    clock.worldLoopCounter,worldFX.lastDroppedParticleEffect,worldFX.lastDroppedParticleCar,
+                    worldFX.lastDroppedGroupEffect,worldFX.lastDroppedGroupCar,
+                    frameFX.lastDroppedParticleEffect,frameFX.lastDroppedParticleCar,
+                    frameFX.lastDroppedGroupEffect,frameFX.lastDroppedGroupCar);
+                host.RecordSessionEvent("gameplay.fx_last_capacity_drop",detail);
+            }
+        }
         // A bounded observation of the actual owners makes a live AI failure
         // distinguishable from authored input playback and device starvation.
         // It never refreshes a road, services a voice or changes a controller.
@@ -421,6 +583,15 @@ struct ApplicationRuntime::Storage {
         const auto width=host.Width(),height=host.Height();
         Require(width>0 && height>0,"Native render extent is unavailable");
         cameras.projection.nativeSourceVideoMode=gameTimeGetVideoMode(&clock);
+        const int reflectionScale=nativeRenderSettings().reflections==2?2:1;
+        for(std::size_t index=8;index<targets.size();++index) {
+            const int size=(index==14?256:64)*reflectionScale;
+            const bool changed=targets[index].width!=size || targets[index].height!=size;
+            if(changed) {
+                targets[index].width=targets[index].height=size;
+                ecstasyViewsApplyMode(&cameras);
+            }
+        }
         if(targets[0].width==width && targets[0].height==height && cameras.projection.horizontalResolution==width)return;
         for(std::size_t index=0;index<8;++index) {targets[index].width=width;targets[index].height=height;}
         cameras.projection.horizontalResolution=width;
@@ -486,6 +657,18 @@ struct ApplicationRuntime::Storage {
         memcards=std::make_unique<MemcardScreens>(profilesOwner,nativeDirectory.empty()?nullptr:nativeDirectory.c_str(),
             legacyDirectory.empty()?nullptr:legacyDirectory.c_str());
         BindMemcardScreens(*memcards,menus);
+        if(host.PcSettings()) {
+            menus.pcHost=&host;
+            menus.profiles=memcards.get();
+            menus.applyPcDisplay=[this](const NativePcSettings& settings) {
+                InvalidatePreparedScene();
+                host.ApplyDisplaySettings(settings.width,settings.height,settings.fullscreen,settings.vsync);
+                profilesOwner.nativeDisplay={settings.width,settings.height,settings.fullscreen,settings.vsync};
+                launchDisplay=profilesOwner.nativeDisplay;
+                RefreshNativeDisplayGeometry();
+            };
+            for(auto& configuration:NativeOptionsScreenConfigurations())RegisterScreen(configuration);
+        }
         trackSelection.ui=&ui;trackSelection.screens=&screens;trackSelection.frontend=&profilesOwner;
         trackSelection.tracks=tracks.get();trackSelection.resources=&files;trackSelection.raceSetup=&setup;
         trackSelection.cameras=&cameras;trackSelection.frame=&frontendFrame;BindTrackSelectScreen(trackSelection);
@@ -522,32 +705,33 @@ struct ApplicationRuntime::Storage {
     bool PreparedSceneResourcesStable() noexcept
     {
         auto* session=Session();
-        if(!flow.inGameFlag || !session || session->state!=3 || !resources)return false;
+        if(!flow.inGameFlag || !session || !resources)return false;
+        // The pause menu and its backdrop still advance on each logical tick.
+        // Between ticks their captured draw commands can be presented again.
+        if(session->state!=RC_STATE_RACE_IN_PROGRESS && session->state!=RC_STATE_PAUSE)return false;
         const auto& loader=resources->Loader();
         if(!loader.IsResourceLoadingComplete() || loader.HasPendingFileReads())return false;
         for(const auto* pack:texturePackRegistry.packs)if(pack->HasPendingReads())return false;
         return true;
     }
-    static std::array<char,48> CurrentFrameRateCaption() noexcept
-    {
-        std::array<char,48> caption{};
-        if(applicationShowFrameRate) {
-            if(applicationFrameTiming.frameRateAvailable)
-                std::snprintf(caption.data(),caption.size(),"FPS: %.1f",applicationFrameTiming.framesPerSecond);
-            else std::snprintf(caption.data(),caption.size(),"FPS: --");
-        }
-        return caption;
-    }
     void InvalidatePreparedScene() noexcept
     {
+        if(frame && frame->State()==EcstasyFrame::Phase::Ready)frame->CancelBeforeSubmit();
         preparedSceneValid=false;host.InvalidatePreparedFrame();
+    }
+    void ServiceFrameResources()
+    {
+        pendingFrameResources=false;
+        texturePackRegistry.ServiceReads();
+        resources->Loader().ServiceResourceLoading();
+        replayAvailableBytes=host.AvailableMemory();
     }
     void RememberPreparedScene()
     {
         preparedSceneValid=PreparedSceneResourcesStable();
         if(!preparedSceneValid)return;
         preparedSession=Session();preparedResourceRevision=resources->Registry().Models().bindingRevision;
-        preparedShowFrameRate=applicationShowFrameRate;preparedFrameRateCaption=CurrentFrameRateCaption();
+        preparedShowFrameRate=applicationShowFrameRate;preparedFrameRateCaption=nativeFrameRateCaption();
         const auto* caption=applicationDebugToolsEnabled?joystickNativeDebugCaption():nullptr;
         preparedDebugCaptionPresent=caption!=nullptr;preparedDebugCaption=caption?caption:"";
     }
@@ -555,7 +739,7 @@ struct ApplicationRuntime::Storage {
     {
         if(!preparedSceneValid || !PreparedSceneResourcesStable() || preparedSession!=Session() ||
            preparedResourceRevision!=resources->Registry().Models().bindingRevision ||
-           preparedShowFrameRate!=applicationShowFrameRate || preparedFrameRateCaption!=CurrentFrameRateCaption())return false;
+           preparedShowFrameRate!=applicationShowFrameRate || preparedFrameRateCaption!=nativeFrameRateCaption())return false;
         const auto* caption=applicationDebugToolsEnabled?joystickNativeDebugCaption():nullptr;
         return preparedDebugCaptionPresent==(caption!=nullptr) && preparedDebugCaption==(caption?caption:"");
     }
@@ -580,9 +764,37 @@ struct ApplicationRuntime::Storage {
     }
     void GenerateInput(ReplayManager* replay)
     {
+        auto* session=Session();
+        const bool replayPointer=session && session->state==RC_STATE_INSTANT_REPLAY && !screens.active;
+        const bool menuPointer=frontend::CanUseFrontendPointer(screens);
+        host.SetMenuPointer(menuPointer || replayPointer);
+        const auto* players=session?trackPhase->Players():nullptr;
+        const auto* player=players?players->playersByNumber[0]:nullptr;
+        const bool menu=replayPointer || screens.active || !player || player->inputMode==0 || player->inputMode==1 || player->inputMode==6;
+        const bool pause=session && session->state==RC_STATE_PAUSE && !screens.IsAnyPopupActive();
+        host.SetMenuInput(menu,pause,ui.twoPlayerScreenMode!=0 || (players && players->count>1));
+        host.SetReplayInput(replayPointer);
         host.BeginInputStep(simulationClock.Deadline());
+        if(ui.resources)ui.resources->SetPromptDevice(host.PromptDevice());
         Require(joystickGenerateEvents(input,samples,joylog,replay,clock,demo)==GAME_INPUT_OK,
             "Source joystick scanner/typed callback dispatch failed");
+        for(std::int32_t port=0;port<2;++port)if(host.HasDualSense(port)) {
+            const auto* seat=players && port<players->count?players->players[port]:nullptr;
+            const bool driving=!menu && !pause && !replayPointer && !joylog.replaying &&
+                (!replay || !replay->restoring) && seat && seat->driver && seat->driver->kind==CAR_DRIVER_REAL;
+            const auto pedalButton=[&](int32_t direct,int32_t pressure) {
+                if(!driving)return 0u;
+                const auto button=joystickGetButtonChar(&input,port,direct);
+                return button?button:joystickGetButtonChar(&input,port,pressure);
+            };
+            host.SetDrivingTriggers(port,pedalButton(0x71,0x72),pedalButton(0x74,0x75));
+        }
+        float x{},y{};bool click=false;int wheel=0;
+        if((menuPointer || replayPointer) && !joylog.replaying && host.ReadMenuPointer(x,y,click,wheel)) {
+            if(menuPointer && frontend::CanUseFrontendPointer(screens))
+                screens.HandlePointer(x,y,click,wheel,host.MenuPointerHeld());
+            else if(replayPointer && !screens.active)raceCoordinatorReplayPointer(*session,x,y,click,host.MenuPointerHeld());
+        }
     }
 };
 
@@ -606,6 +818,7 @@ void ApplicationRuntime::SetDisplayOptions(int32_t width,int32_t height,bool ful
 {
     auto& s=*storage_;Require(s.initialized,"Display settings precede profile initialization");
     Require(width>0 && height>0,"Display extent must be positive");
+    s.InvalidatePreparedScene();
     s.host.ApplyDisplaySettings(width,height,fullscreen,vsync);
     s.profilesOwner.nativeDisplay={width,height,fullscreen,vsync};
     s.launchDisplay=s.profilesOwner.nativeDisplay;s.RefreshNativeDisplayGeometry();
@@ -621,7 +834,7 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.demo.Init(s.clock,applicationLaunchOptions,DemoDiscConfiguration{});
     s.demoReplay.BindSessionHost(&s.host);
     applicationSeedRandomNumber(s.joylog);
-    applicationLoadConfig(configFile.empty()?s.profileDirectory/"config.ini":configFile,s.joylog);
+    applicationLoadConfig(configFile.empty()?s.profileDirectory/NativeTrackOverrideFilename:configFile,s.joylog);
     eMathInit();
     InitStomper();
     InitDisplaySystem(s.files,s.clock);
@@ -784,12 +997,16 @@ bool ApplicationRuntime::Tick()
         s.frameTiming.Reset(resumed);s.simulationClock.Reset(resumed);applicationFrameTiming={};
     }
     auto observed=s.host.FrameTime();
-    if(!s.simulationClock.UpdateDue(observed) && !s.host.PresentationDue(observed)) {
+    const bool updateDue=s.simulationClock.UpdateDue(observed);
+    if(updateDue && s.frame->State()==EcstasyFrame::Phase::Ready)s.InvalidatePreparedScene();
+    const bool captureReady=s.frame->State()==EcstasyFrame::Phase::Ready;
+    if(!captureReady && s.pendingFrameResources)s.ServiceFrameResources();
+    if(!updateDue && !s.host.PresentationDue(observed)) {
         s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));
         return true;
     }
     bool reusedPreparation=false;
-    if(!s.simulationClock.UpdateDue(observed) && s.PreparedSceneUnchanged()) {
+    if(!captureReady && !updateDue && s.PreparedSceneUnchanged()) {
         platform::ScopedNativeDuration measure(s.presentationTiming);
         reusedPreparation=s.host.TrySubmitPreparedFrame();
         // Preserve the display owner's counter for this real render. It is
@@ -801,7 +1018,7 @@ bool ApplicationRuntime::Tick()
     bool advancedPresentation=false;
     std::uint32_t updates=0,captures=0;
     double captureMilliseconds=0.0,sealMilliseconds=0.0;
-    if(!reusedPreparation)for(;;) {
+    if(!captureReady && !reusedPreparation)for(;;) {
         advancedPresentation=s.simulationClock.UpdateDue(observed);
         if(advancedPresentation) {
             s.InvalidatePreparedScene();
@@ -825,6 +1042,8 @@ bool ApplicationRuntime::Tick()
             const auto* previousSimulation=s.Simulation();
             const bool previouslyInGame=s.flow.inGameFlag!=0;
             s.ServiceFlow();
+            s.host.SetRacePresentation(s.flow.inGameFlag!=0);
+            s.RefreshNativeDisplayGeometry();
             if(auto* session=s.Session()) {
                 Require(raceCoordinatorExecuteQueuedMessages(session)!=0,"RaceCoordinator queued-message dispatch failed");
                 (void)raceCoordinatorCheckForDemoDiscTimeout(session);
@@ -1027,7 +1246,13 @@ bool ApplicationRuntime::Tick()
                 for(std::int32_t index=0;index<simulation->world->totalCars;++index)
                     if(auto* car=simulation->world->carTable[index])
                         if(car->visual)carDriverVisualAdvance(car->visual);
+            s.pendingClockAdvance=true;
+            s.simulationClock.CompleteStep(s.scheduledStepQuanta);
+            ++updates;
         }
+        // The same observed deadline controls both catch-up and submission.
+        // A superseded step still runs ordered display-side state changes.
+        const bool catchingUp=s.simulationClock.UpdateDue(observed);
         Require(s.frame->State()==EcstasyFrame::Phase::Complete || s.frame->Commands().empty(),"Previous CPU frame capture is still live");
         if(s.frame->State()==EcstasyFrame::Phase::Complete)s.frame->BeginNextFrame();
         else Require(s.frame->State()==EcstasyFrame::Phase::Building && s.frame->Commands().empty(),"Previous CPU frame capture is still live");
@@ -1036,6 +1261,9 @@ bool ApplicationRuntime::Tick()
         scene.environmentMap=s.environmentMap.get();scene.effects=&s.resources->FX();
         scene.advancePresentation=advancedPresentation;scene.deferPresentationUpdates=true;
         s.RememberPreparedScene();
+        const auto* renderSession=s.Session();
+        scene.retainPausedScenery=s.preparedSceneValid && renderSession->state==RC_STATE_PAUSE;
+        scene.emitSceneryGeometry=!catchingUp;
         const auto captureStarted=std::chrono::steady_clock::now();
         EcstasyDisplayFrame(scene,*s.frame);
         const auto sealStarted=std::chrono::steady_clock::now();
@@ -1044,19 +1272,12 @@ bool ApplicationRuntime::Tick()
         captureMilliseconds+=std::chrono::duration<double,std::milli>(sealStarted-captureStarted).count();
         sealMilliseconds+=std::chrono::duration<double,std::milli>(sealCompleted-sealStarted).count();
         ++captures;
-        if(advancedPresentation) {
-            s.pendingClockAdvance=true;
-            s.simulationClock.CompleteStep(s.scheduledStepQuanta);
-            ++updates;
-            // Catch up complete logical updates before one presentation. Bound
-            // work per host call, but retain all outstanding time for later calls.
-            if(updates<8u && s.simulationClock.UpdateDue(observed)) {
-                s.InvalidatePreparedScene();
-                s.frame->CancelBeforeSubmit();
-                texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-                s.replayAvailableBytes=s.host.AvailableMemory();
-                continue;
-            }
+        // Bound work per host call while carrying outstanding logical steps
+        // forward. This capture cannot take the submission path below.
+        if(catchingUp && updates<8u) {
+            s.InvalidatePreparedScene();
+            s.ServiceFrameResources();
+            continue;
         }
         break;
     }
@@ -1064,22 +1285,19 @@ bool ApplicationRuntime::Tick()
     const auto capturedUpdateMs=static_cast<double>(s.sourceUpdateTiming.totalNanoseconds-sourceBefore)*1.0e-6;
     const bool simulationBehind=s.simulationClock.UpdateDue(observed);
     if(!reusedPreparation && (simulationBehind || !s.host.PresentationDue(s.host.FrameTime()))) {
-        // A logical frame still executes the source capture/post-draw contract,
-        // but a capped display or a bounded catch-up call does not submit it
-        // to the GPU. Drain existing debt before another blocking presentation:
-        // otherwise a GPU slower than eight logical steps per frame would add
-        // time faster than this loop could consume it, despite retaining debt.
-        // Return through PollEvents between batches to preserve responsiveness.
-        s.InvalidatePreparedScene();s.frame->CancelBeforeSubmit();
+        // Keep the sealed scene when the cap is the only reason to wait. A new
+        // logical step retires it before advancing any of its resource owners.
+        // When behind, drain the logical steps before blocking on the GPU.
         s.deferredPresentationCpuMilliseconds+=capturedUpdateMs;
         s.deferredCaptureMilliseconds+=captureMilliseconds;s.deferredSealMilliseconds+=sealMilliseconds;
         s.deferredLogicalUpdates+=updates;s.deferredSceneCaptures+=captures;
-        if(advancedPresentation) {
-            texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-            s.replayAvailableBytes=s.host.AvailableMemory();
-        }
-        if(!simulationBehind)
+        s.pendingFrameResources=s.pendingFrameResources || advancedPresentation;
+        if(simulationBehind) {
+            s.InvalidatePreparedScene();
+            if(s.pendingFrameResources)s.ServiceFrameResources();
+        } else {
             s.host.WaitUntil(std::min(s.simulationClock.Deadline(),s.host.PresentationDeadline()));
+        }
         return !s.demo.ExitRequested();
     }
     if(!reusedPreparation) {
@@ -1148,10 +1366,7 @@ bool ApplicationRuntime::Tick()
     }
 
     Require(s.frame->State()==EcstasyFrame::Phase::Complete,"Physical presenter did not retire the CPU frame capture");
-    if(advancedPresentation) {
-        texturePackRegistry.ServiceReads();s.resources->Loader().ServiceResourceLoading();
-        s.replayAvailableBytes=s.host.AvailableMemory();
-    }
+    if(advancedPresentation || s.pendingFrameResources)s.ServiceFrameResources();
     if(s.preparedSceneValid && !s.PreparedSceneUnchanged())s.InvalidatePreparedScene();
     // No PAL/NTSC wait: presentation follows the physical backend/VSync.
     // Observe its complete wall interval, including resource and device waits.

@@ -13,6 +13,7 @@
 #include "indep/inc/eMath.hpp"
 #include "bware/inc/bMath.hpp"
 #include <math.h>
+#include <cmath>
 
 void driverAIRoadInitialize(DriverAIRoadState* road,CarDriverKind kind)
 {
@@ -180,10 +181,7 @@ DriverAIAction* driverAISelectAction(DriverAIBase* driver)
     /* Traffic inherits the original empty factory. Its cruise action is
      * installed by its actual placement/reset operation. */
     if(driver->actionCode!=11){driver->actionCode=11;return candidate;}
-    // Native PC arbitration admits eligible recovery over RoadBlock;
-    // other automatic candidates keep the original priority comparison.
-    if(candidate&&driver->action&&(driver->action->priority<candidate->priority||
-        (driver->action->kind==8&&candidate->kind==7)))return candidate;
+    if(candidate&&driver->action&&driver->action->priority<candidate->priority)return candidate;
     free(candidate);
     return NULL;
 }
@@ -304,6 +302,12 @@ static CarFramePlayerState* playerAtSeat(const CarFramePlayerRegistry* players,i
     return NULL;
 }
 
+static bool nativeRacePaceDisabled(const DriverAIBase* driver,const RaceParameters* settings)
+{
+    return settings && driver->kind==CAR_DRIVER_AI && !settings->demoReplay &&
+        hp2::applicationNativeGameplay.disableCatchUp;
+}
+
 void driverAICompareRacePace(DriverAIBase* driver,const RaceCarEntry* own,
     const RaceCarEntry* player,float* positionResponse,float* speedResponse)
 {
@@ -311,11 +315,7 @@ void driverAICompareRacePace(DriverAIBase* driver,const RaceCarEntry* own,
     *speedResponse=0.0f;
     const WorldSimulation* simulation=driver->environment->simulation;
     const RaceParameters* settings=simulation->race->services->settings;
-    // The PC user override must also be honoured by the final AI pace
-    // consumer, even if a frontend flow later reloads a PAL-forced value.
-    if(!settings->relativePaceEnabled ||
-       (hp2::applicationNativeGameplay.disableCatchUp &&
-        !settings->demoReplay && !settings->fastSpeedTrapSpawns))return;
+    if(!settings->relativePaceEnabled || nativeRacePaceDisabled(driver,settings))return;
     const DriverBehavior* behavior=driver->environment->behavior;
     const DriverAIPolicy* policy=driver->environment->policy;
     if(!policy||!policy->launch||!behavior){driver->result=CAR_DRIVER_INVALID_BINDING;return;}
@@ -362,25 +362,23 @@ void driverAIUpdateRacePace(DriverAIBase* driver)
 {
     CarMovement* movement=driver->physics.movement;
     RaceCarEntry* own=movement->bindings.owner->raceEntry;
-    if(!own||!driver->paceEnabled||movement->bindings.player)return;
     WorldSimulation* simulation=driver->environment->simulation;
-    const DriverBehavior* behavior=driver->environment->behavior;
-    const DriverAIPolicy* policy=driver->environment->policy;
-    if(!behavior||!policy||!simulation->race||!simulation->race->services||
-        !simulation->race->services->settings||!simulation->race->services->session){
-        driver->result=CAR_DRIVER_INVALID_BINDING;return;
-    }
-    const RaceParameters* settings=simulation->race->services->settings;
-    // Both distance/rank correction and the later player-average-speed
-    // multiplier belong to Catch Up. Disabling only CompareRacePace left
-    // the second multiplier active, and the interval gate retained a prior
-    // boost. Clear only these pacing outputs; authored AI skill stays live.
-    if(!settings->relativePaceEnabled ||
-       (hp2::applicationNativeGameplay.disableCatchUp &&
-        !settings->demoReplay && !settings->fastSpeedTrapSpawns)){
+    // ForceBoost disables the pace owner while a scripted scale is active.
+    // Clear scales only while Catch Up owns the output.
+    if(!own||!driver->paceEnabled||movement->bindings.player)return;
+    const RaceFrameServices* services=simulation&&simulation->race?simulation->race->services:NULL;
+    const RaceParameters* settings=services?services->settings:NULL;
+    // The Windows preference clears both live pacing contributions before
+    // the sampling interval. PAL's authored flag gates only the comparison.
+    if(nativeRacePaceDisabled(driver,settings)){
         driver->pacePlayer=NULL;
         movement->bindings.state->performanceScale=1.0f;
         return;
+    }
+    const DriverBehavior* behavior=driver->environment->behavior;
+    const DriverAIPolicy* policy=driver->environment->policy;
+    if(!behavior||!policy||!settings||!services->session){
+        driver->result=CAR_DRIVER_INVALID_BINDING;return;
     }
     const int32_t now=movement->bindings.environment->clock->worldTimer;
     const int32_t elapsed=(int32_t)((uint32_t)now-(uint32_t)driver->performanceSampleTicks);
@@ -391,7 +389,7 @@ void driverAIUpdateRacePace(DriverAIBase* driver)
     const int32_t affectsPace=driver->action&&driver->action->affectsRacePace!=0;
     const float raceSeconds=(float)simulation->race->elapsedTicks*0.0002500000118743628f;
     float performance=1.0f;
-    if(!policy->disableRacePace&&simulation->race->services->session->state!=8&&settings->mode>0){
+    if(!policy->disableRacePace&&services->session->state!=8&&settings->mode>0){
         if(!affectsPace){movement->bindings.state->performanceScale=performance;return;}
         if(!(raceSeconds<30.0f)){
             CarFramePlayerRegistry* players=simulation->players;
@@ -453,7 +451,11 @@ void driverAIUpdateRacePace(DriverAIBase* driver)
             performance=performance*maximumFinite(adjusted,limit);
         }
     }
-    movement->bindings.state->performanceScale=performance;
+    // Non-finite values are never an authored vehicle performance mode.
+    // A bad ratio from a malformed road sample or restored replay state
+    // must not be fed to the engine, wheel-force and drag multipliers.
+    movement->bindings.state->performanceScale=
+        std::isfinite(performance) && performance>0.0f ? performance:1.0f;
 }
 
 #include "indep/inc/AITickSchedule.hpp"
@@ -523,8 +525,11 @@ void driverAIApplyAction(DriverAIBase* driver)
                     const CarRecoveryPose* pose=carRecoveryConnectionPose(registry,connection);
                     if(!pose){driver->result=CAR_DRIVER_MISSING_ROAD;return;}
                     speed=(float)pose->laneSpeeds[road->lane];
-                }else if(timerRunning(driver->connectionDelayTicks))speed=99999.0f;
-                else{
+                }else if(timerRunning(driver->connectionDelayTicks)) {
+                    // PAL uses an unbounded control target during the road
+                    // transition and skips drawing a random lane sample.
+                    speed=99999.0f;
+                }else{
                     if(!behavior){driver->result=CAR_DRIVER_INVALID_BINDING;return;}
                     const int32_t now=movement->bindings.environment->clock->worldTimer;
                     const int32_t elapsed=(int32_t)((uint32_t)now-(uint32_t)driver->speedOffsetSampleTicks);

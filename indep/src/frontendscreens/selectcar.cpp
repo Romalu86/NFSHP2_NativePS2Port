@@ -366,6 +366,7 @@ struct CarSelector::Storage {
     float radius{7.94950008392334f};std::array<float,4> offset{{-0.015769999474287033f,0.0f,-0.015769999474287033f,0.0f}};
     std::uint16_t vertical{0x3d60},fov{0x1c44},yaw{0x3efb};
     std::array<std::uint32_t,10> swatches{},swatchTextures{};std::int32_t swatchCount{};
+    std::array<bool,10> swatchUsesBodyTexture{};
     struct NativeBitmapLayout {
         FlailerBitmapChunk* bitmap{};
         std::uint32_t textureKey{};
@@ -629,11 +630,9 @@ void CarSelector::SetupSwatches()
         const auto index=static_cast<std::size_t>(i);own.swatches[index]=SelectCarIndexedKey("SWATCH_%d",i);
         const auto* skin=own.services->menus->raceSetup->cars->FindSkin(car.definition->modelCode,car.availability->skinNumbers[index],car.definition->bodyCategory!=2);
         Require(skin,"Car selector swatch has no actual skin descriptor");
-        // Every released traffic SkinInfo row points at the same placeholder
-        // swatch. Its real per-skin livery is already acquired by CarLoader's
-        // frontend all-skins load and identifies paint as well as markings.
-        own.swatchTextures[index]=car.definition->bodyCategory==2?
-            hashString((car.definition->baseName+"_SKIN"+std::to_string(skin->skinNumber)).c_str()):skin->authoredWord30;
+        own.swatchUsesBodyTexture[index]=car.definition->bodyCategory==2;
+        own.swatchTextures[index]=own.swatchUsesBodyTexture[index] ?
+            hashString((car.definition->baseName+"_SKIN"+std::to_string(skin->skinNumber)).c_str()):skin->colorSwatchTextureKey;
     }
 }
 void CarSelector::UpdateSwatches()
@@ -649,7 +648,7 @@ void CarSelector::UpdateSwatches()
         const auto index=static_cast<std::size_t>(i);auto* object=resources.FindObject(own.screen,own.swatches[index],2);
         Require(object,"Car selector is missing an authored SWATCH bitmap");
         auto& bitmap=*static_cast<FlailerBitmapChunk*>(object);
-        if(traffic) {
+        if(own.swatchUsesBodyTexture[static_cast<std::size_t>(i)]) {
             (void)own.RememberBitmap(bitmap);
             // Pending asynchronous car loads have no pixel owner yet. Keep
             // the cell hidden until that exact skin arrives; never resolve
@@ -919,11 +918,11 @@ void CarSelector::Tick()
     Require(swatch>=0 && static_cast<std::size_t>(swatch)<own.swatchTextures.size(),
         "Select Car lighting swatch exceeds the actual texture table");
     auto lightingSwatch=own.swatchTextures[static_cast<std::size_t>(swatch)];
-    if(current.definition->bodyCategory==2) {
+    if(own.swatchUsesBodyTexture[static_cast<std::size_t>(swatch)]) {
         const auto* skin=own.services->menus->raceSetup->cars->FindSkin(current.definition->modelCode,
             current.availability->skinNumbers[static_cast<std::size_t>(swatch)],false);
-        Require(skin,"Traffic preview lighting lost its actual skin");
-        lightingSwatch=skin->authoredWord30; // UI atlas choice does not change authored preview lighting.
+        Require(skin,"Body-livery swatch lighting lost its skin material");
+        lightingSwatch=skin->colorSwatchTextureKey; // UI atlas choice does not change authored preview lighting.
     }
     auto* texture=texturePackRegistry.ResolveLoadedTexture(own.services->resources->Models(),lightingSwatch);
     float amount=0.0f;

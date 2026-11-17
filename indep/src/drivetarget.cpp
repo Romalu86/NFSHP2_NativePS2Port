@@ -163,8 +163,7 @@ void driverCommandResample(DriverCommand* command)
     float differences[DRIVER_COMMAND_CAPACITY][4];
     float lengths[DRIVER_COMMAND_CAPACITY];
     float points[DRIVER_COMMAND_CAPACITY][4];
-    float totalLength=0.0f;
-    bool hasRepeatedPoint=false;
+    double totalLength=0.0;
     for(int32_t index=0;index<command->count;++index)
         for(float coordinate:command->points[index].position)
             hp2::Require(std::isfinite(coordinate),"DriveTarget resample has a non-finite point");
@@ -178,69 +177,30 @@ void driverCommandResample(DriverCommand* command)
         const float zz=bScalarMultiply(differences[index][2],differences[index][2]);
         lengths[index]=bScalarSquareRoot(bScalarAdd(bScalarAdd(xx,yy),zz));
         hp2::Require(std::isfinite(lengths[index]),"DriveTarget resample segment exceeds finite range");
-        hasRepeatedPoint=hasRepeatedPoint || lengths[index]==0.0f;
-        totalLength=bScalarAdd(totalLength,lengths[index]);
+        totalLength+=lengths[index];
     }
-    hp2::Require(std::isfinite(totalLength),"DriveTarget resample length exceeds finite range");
-    // Dynamic commands may repeat points even when authored roads do not.
-    // Zero-length segments carry no arc distance; skip them. A stationary
-    // command retains its points instead of evaluating a saturated 0/0.
-    if(hasRepeatedPoint){
-        if(totalLength>0.0f){
-            int32_t segment=0;
-            float traversed=0.0f;
-            for(int32_t output=0;output<command->count-1;++output){
-                const float distance=(static_cast<float>(output)/static_cast<float>(command->count-1))*totalLength;
-                while(segment<command->count-2 &&
-                    (lengths[segment]==0.0f || traversed+lengths[segment]<distance)){
-                    traversed+=lengths[segment++];
-                }
-                const float fraction=lengths[segment]>0.0f ? (distance-traversed)/lengths[segment] : 0.0f;
-                for(int axis=0;axis<4;++axis)
-                    points[output][axis]=command->points[segment].position[axis]+differences[segment][axis]*fraction;
+    const float commandLength=static_cast<float>(totalLength);
+    hp2::Require(std::isfinite(commandLength),"DriveTarget resample length exceeds finite range");
+    // Sample by index so rounding cannot drop the final interval. The
+    // existing endpoints are exact, and repeated points add no distance.
+    if(totalLength>0.0){
+        const int32_t lastPoint=command->count-1;
+        int32_t segment=0;
+        double traversed=0.0;
+        for(int32_t output=1;output<lastPoint;++output){
+            const double distance=(totalLength*output)/lastPoint;
+            while(segment<lastPoint-1 &&
+                (lengths[segment]==0.0f || traversed+lengths[segment]<distance)){
+                traversed+=lengths[segment++];
             }
-            memcpy(points[command->count-1],command->points[command->count-1].position,sizeof(points[0]));
-            for(int32_t index=0;index<command->count;++index)
-                memcpy(command->points[index].position,points[index],sizeof(points[index]));
+            const float fraction=static_cast<float>((distance-traversed)/lengths[segment]);
+            for(int axis=0;axis<4;++axis)
+                points[output][axis]=command->points[segment].position[axis]+differences[segment][axis]*fraction;
         }
-        command->length=totalLength;command->adjustmentTicks=0;command->closestTicks=0;
-        return;
+        for(int32_t output=1;output<lastPoint;++output)
+            memcpy(command->points[output].position,points[output],sizeof(points[output]));
     }
-    command->length=totalLength;
-    memcpy(differences[command->count-1],differences[command->count-2],sizeof(differences[0]));
-    lengths[command->count-1]=lengths[command->count-2];
-    const float step=totalLength/static_cast<float>(command->count-1);
-    /* The original copies every output slot even when rounding or a zero
-     * length path leaves a slot unwritten on its stack. Retain the existing
-     * point in that case, giving native storage a defined lifetime. */
-    for(int32_t index=0;index<command->count;++index)
-        memcpy(points[index],command->points[index].position,sizeof(points[index]));
-    int32_t segment=0;
-    int32_t output=0;
-    float residual=0.0f;
-    float distance=0.0f;
-    float previousDistance=0.0f;
-    // PAL21C75C/21C77C accumulate the finite step. Host rounding can terminate
-    // this loop one sample early, shortening both the command and its belt.
-    while(segment<command->count&&distance<=totalLength&&output<command->count){
-        previousDistance=distance;
-        distance=bScalarAdd(previousDistance,step);
-        const float fraction=residual/lengths[segment];
-        residual=bScalarAdd(residual,step);
-        for(int axis=0;axis<4;++axis){
-            const float scaled=bScalarMultiply(differences[segment][axis],fraction);
-            points[output][axis]=bScalarAdd(scaled,command->points[segment].position[axis]);
-        }
-        ++output;
-        if(!(distance<=totalLength))break;
-        while(segment<command->count&&lengths[segment]<=residual){
-            residual=bScalarAdd(residual,-lengths[segment]);
-            ++segment;
-        }
-    }
-    command->length=previousDistance;
-    for(int32_t index=0;index<command->count;++index)
-        memcpy(command->points[index].position,points[index],sizeof(points[index]));
+    command->length=commandLength;
     command->adjustmentTicks=0;
     command->closestTicks=0;
 }

@@ -20,6 +20,20 @@ namespace hp2::frontend {
 // returning from another frontend screen; the input queue remains EasterEggs.
 std::int32_t mainMenuClearEasterEggButtons=0;
 
+bool RequestNativeMenuExit(MainMenuScreenServices& services)
+{
+    if(services.screens->IsAnyPopupActive())return false;
+    const auto language=static_cast<std::size_t>(std::clamp(services.ui->language->currentLanguage,0,5));
+    constexpr const char* text[]{"Exit the game?","Quitter le jeu?","Spiel beenden?",
+        "Uscire dal gioco?","Salir del juego?","Avsluta spelet?"};
+    FlailerPopupConfig popup;
+    popup.sourceNode=services.screens->active;popup.screenKey=0x037f3133u;
+    popup.message=text[language];popup.flags=3;popup.buttonCount=2;
+    popup.buttonLanguageIds={{0x38277,0x38278,0}};
+    popup.buttonResults={{NativeMenuExitResult,0,0}};popup.initialButton=1;popup.joystickPort=-1;
+    return services.screens->SummonPopup(popup)>=0;
+}
+
 namespace {
 constexpr std::uint32_t GlobalScreen=0xae0f8aa1u;
 constexpr std::uint32_t EasterEggGroup=0x74e404b4u;
@@ -189,8 +203,11 @@ public:
             } else if (data.key==0x52e039f6u) {
                 // The next native application tick exits through normal
                 // ApplicationRuntime::Shutdown and its actual owner cleanup.
-                applicationDebugExitRequested=true;
+                RequestNativeMenuExit(services_);
             }
+            break;
+        case ScreenMessage::PopupDismiss:
+            if(data.value==NativeMenuExitResult)applicationDebugExitRequested=true;
             break;
         default:break;
         }

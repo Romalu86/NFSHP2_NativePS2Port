@@ -68,6 +68,7 @@ typedef struct Engine {
     const EngineTuning* tuning;
     SampledCurve torque;
     SampledCurve braking;
+    float proportionalLaunchWeight; // Derived from the current PC pedal and road speed.
 } Engine;
 
 // Configuration, vehicle state and tuning outlive the engine. Initialization

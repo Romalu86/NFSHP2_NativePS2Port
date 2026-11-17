@@ -3,6 +3,7 @@
 #include "Language.hpp"
 #include "Ecstasy.hpp"
 #include "GameFlow.hpp"
+#include "Flags.hpp"
 #include "bware/inc/bWare.hpp"
 #include <algorithm>
 #include <array>
@@ -244,10 +245,12 @@ std::int32_t CarLoader::GetUsedTextures(LoadedSkin& skin,std::uint32_t* keys,std
         "Skin texture enumeration requires its actual shared owners and output extent");
     auto& ride=skin.appearance;
     if (ride.skinNumber==-1) {
+        const auto model=static_cast<std::size_t>(ride.modelCode);
+        const auto skinCount=s.info->AvailableSkinCount(model);
         try {
-            for (std::int32_t index=0;index<s.info->AvailableSkinCount(static_cast<std::size_t>(ride.modelCode));++index) {
+            for (std::int32_t index=0;index<skinCount;++index) {
                 ride.skinNumber=static_cast<std::int8_t>(s.info->AvailableSkinNumber(
-                    static_cast<std::size_t>(ride.modelCode),index,s.language->currentLanguage!=0));
+                    model,index,s.language->currentLanguage!=0));
                 count=GetUsedTextures(skin,keys,count,capacity,frontend);
             }
         } catch(...) {

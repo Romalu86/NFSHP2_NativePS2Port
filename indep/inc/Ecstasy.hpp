@@ -517,6 +517,7 @@ void carReplayAnimationResourceEndFixup(CarReplayAnimationRegistry* registry);
 #include <array>
 #include <vector>
 #include <optional>
+#include <unordered_map>
 #include "indep/inc/eLight.hpp"
 
 struct EditorMarkerResources;
@@ -666,7 +667,9 @@ struct EditorMarkerSolidGeometry {
         std::vector<std::uint8_t> nativeTriangleOrder;
         std::size_t nativeTopologyCount{};
         std::uint64_t nativeTopologyMask{};
+        std::uint64_t nativeVertexRevision{}; // Zero keeps exact byte validation.
         void PrepareNativeTopology();
+        void StampNativeVertexRevision() noexcept;
     };
     struct SharedTables {
         std::vector<TextureBinding> textures;
@@ -774,10 +777,12 @@ EcstasyNativeFeedbackRegion ecstasyNativeFeedbackRegion(const EcstasyRenderTarge
     std::uint32_t width,std::uint32_t height,std::uint32_t logicalWidth,std::uint32_t logicalHeight,
     const std::array<double,2>& translation);
 enum class EcstasyDrawKind { FlailerPolygon,SolidStrip,WorldPolygon,RenderTargetPolygon,ParticleGroup,MirrorOverlayPolygon,WorldStrip,RenderTargetStrip,SolidReflectionStrip,ScreenFilterPolygon,SolidSpecularStrip,ScreenPolygon,FogPass,FocusMaskPass,DepthOfFieldPass,BlackAndWhitePass,DestinationFilterPass };
-// Explicit native presentation policy, not a PS2 packet/layout field.
-// Ordinary authored HUD retains its established edge positions. Only an
-// identified layout owner can request a centred proportional canvas.
-enum class EcstasyUiPlacement : std::uint8_t { OriginalCanvas,CenteredCanvas };
+// Native presentation of authored UI groups in the 640x480 design space.
+enum class EcstasyUiPlacement : std::uint8_t {
+    OriginalCanvas,CenteredCanvas,HudLeft,HudRight,HudLeftDuringRace,CoverCanvas,FitImage
+};
+std::array<float,4> ecstasyNativeUiViewport(EcstasyUiPlacement placement,
+    const std::array<float,4>& viewport);
 enum EcstasyNativeRenderEggState : std::uint32_t {
     EcstasyRenderEggTexturing=1u,
     EcstasyRenderEggWireframe=2u,
@@ -803,7 +808,9 @@ struct EcstasyDrawCommand {
     EcstasyScreenFilter screenFilter;
     std::uint32_t feedbackGroup{};
     const EditorMarkerLightMaterial* lightMaterial{};
-    std::optional<SceneLightContext> lightContext;
+    // The captured value is shared by the model's strips and material
+    // passes. The pause cache can retain these packets across frame reuse.
+    std::shared_ptr<const SceneLightContext> lightContext;
     const CarCinematicScreen* view{};
     const EcstasyRenderTarget* target{};
     // DisplayRVMs borrows the real source target; this is not a TextureInfo
@@ -878,10 +885,9 @@ struct EcstasyDepthTransfer {
     float nativeSampleScale{1.0f};
     std::uint32_t maximumDepth{65535};
     std::array<float,16> clipToScreen{};
-    // StuffSun consumes the preceding tile's bounds before publishing the
-    // next rectangle. Keep those actual inputs for native preparation reuse.
-    std::array<std::int32_t,4> consumedBounds{};
-    bool consumedBoundsValid{};
+    // These bounds belong to the pixels produced by this request. Both are
+    // published together after the GPU finishes the readback.
+    std::array<std::int32_t,4> sampleBounds{};
 };
 
 class EcstasyFrame final {
@@ -911,6 +917,7 @@ public:
     SceneLightContext SetupWorldLightContext(ResourceRegistry& resources,const CarCinematicScreen& view) const;
     std::uint32_t RenderFrameCounter() const noexcept {return renderFrameCounter_;}
     std::int32_t ApplicationState() const noexcept {return environmentApplicationState_;}
+    bool InGamePresentation() const noexcept {return inGameMaterials_;}
     // PAL118150/118498: frame-owned native strips sample the actual rendered
     // face image, with the original target14 coordinates and ALPHA context.
     void RenderTargetStrip(const std::vector<frontend::FlailerPolyVertex>& vertices,
@@ -954,7 +961,7 @@ public:
         const CarCinematicScreen& view);
     void TransferZBufferRect(std::shared_ptr<SunDepthSamples> destination,
         const CarCinematicScreen& view,std::int32_t x,std::int32_t y,std::int32_t width,std::int32_t height,
-        float nativeSampleScale=1.0f,const std::array<std::int32_t,4>* consumedBounds=nullptr);
+        float nativeSampleScale=1.0f,const std::array<std::int32_t,4>* sampleBounds=nullptr);
     const std::vector<EcstasyDepthTransfer>& DepthTransfers() const noexcept {return depthTransfers_;}
     // Full PAL10FF88 ePoly::Render3D. Source stack polygons/matrices are
     // copied into frame-owned transport, just as its original DMA packet.
@@ -969,7 +976,8 @@ public:
     std::size_t RenderModel(EditorMarkerModel& model,const float localToWorld[16],
         const CarCinematicScreen& view,std::uint32_t flags=0,float alphaScale=1.0f,
         std::int32_t worldFrames=0,const SceneLightContext* lightContext=nullptr,
-        const std::vector<std::array<float,16>>* boneMatrices=nullptr);
+        const std::vector<std::array<float,16>>* boneMatrices=nullptr,bool emitGeometry=true,
+        const std::vector<EcstasyVisibleStrip>* preparedVisibility=nullptr);
     void RenderStrip(const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
         const float localToWorld[16],const CarCinematicScreen& view,
@@ -989,18 +997,18 @@ public:
     // frame, captured source state or texture-animation callback is reused.
     void BeginNextFrame();
 private:
+    friend class SceneryResources;
     // Only the issuing owner reads writable frame/render policy. Preparation
     // borrows immutable geometry and projection inputs until its synchronous
     // join, and writes commands/posed strips into a separate ordered chunk.
     struct StripCaptureState;
-    StripCaptureState CaptureStripState() const;
+    StripCaptureState CaptureStripState(const float localToWorld[16],
+        const CarCinematicScreen& view,const SceneLightContext* lightContext) const;
     static void CaptureStrip(std::vector<EcstasyDrawCommand>& output,
         std::uint64_t& alphaGroups,const StripCaptureState& state,
         const EditorMarkerModel& model,const EditorMarkerSolidGeometry::Strip& strip,
         const TextureInfo& texture,const EditorMarkerLightMaterial* material,
-        const float localToWorld[16],const CarCinematicScreen& view,
-        std::int32_t clipClass,std::uint32_t flags,float alphaScale,
-        const SceneLightContext* lightContext,const float preparedLocalToClip[16]);
+        std::int32_t clipClass,std::uint32_t flags,float alphaScale);
     struct ModelStripSource {std::size_t index{};std::int32_t clipClass{};};
     struct ModelCaptureChunk {
         std::vector<EcstasyDrawCommand> commands;
@@ -1018,6 +1026,11 @@ private:
     std::vector<ModelStripSource> modelStripScratch_;
     std::vector<const TextureInfo*> modelTextureScratch_;
     std::vector<ModelCaptureChunk> modelCaptureScratch_;
+    // The texture registry is resolved by the frame owner before starting
+    // a batch of immutable models. Workers only read this temporary index.
+    using StaticTextureIndex=std::unordered_map<const EditorMarkerTexture*,const TextureInfo*>;
+    const StaticTextureIndex* staticTextureIndex_{};
+    std::vector<std::unique_ptr<EcstasyFrame>> sceneryCaptureScratch_;
     std::vector<EcstasyDepthTransfer> depthTransfers_;
     std::vector<frontend::FlailerStrip*> retainedStrips_;
     std::vector<std::unique_ptr<frontend::FlailerPoly>> worldPolygons_;
@@ -1025,7 +1038,9 @@ private:
     // group before publication, and no resource borrower lives in these quads.
     std::vector<std::unique_ptr<std::vector<EcstasyParticleQuad>>> particleGroups_;
     std::size_t liveParticleGroups_{};
+    void StoreWorldStrip(EcstasyDrawCommand& command,const std::vector<frontend::FlailerPolyVertex>& vertices);
     std::vector<std::unique_ptr<std::vector<frontend::FlailerPolyVertex>>> worldStrips_;
+    std::size_t liveWorldStrips_{};
     std::vector<std::unique_ptr<EditorMarkerSolidGeometry::Strip>> animatedStrips_;
     std::array<EcstasyDepthPalettePass,2> fogPasses_{},focusPasses_{};
     EcstasyFocusSettings focusSettings_{};
@@ -1115,6 +1130,10 @@ struct EcstasySceneBindings {
     // The application defers these post-capture mutations until the next
     // logical update, after every presenter has released the prior borrow.
     bool deferPresentationUpdates{};
+    bool retainPausedScenery{};
+    // ApplicationRuntime has already committed a logical step that will be
+    // superseded before submission. Keep state changes but skip scenery packets.
+    bool emitSceneryGeometry{true};
 };
 void EcstasyDisplayFrame(const EcstasySceneBindings& scene,EcstasyFrame& frame);
 // Independent native UI overlay. It has no authored screen/debug object and
@@ -1150,13 +1169,18 @@ struct EcstasyVulkanFrameStatistics {
 // and gameplay state remain in their existing owners. Zero ELF-body credit.
 enum class EcstasyTextureFilter { Authored,Bilinear,Trilinear,Anisotropic };
 // Native final-image antialiasing and multisample coverage modes.
-enum class EcstasyAntialiasing { Off=0,Fxaa=1,Msaa2=2,Msaa4=3,Msaa8=4 };
+enum class EcstasyAntialiasing { Off=0,Fxaa=1,Msaa2=2,Msaa4=3,Msaa8=4,SmaaHigh=5,SmaaUltra=6 };
+struct EcstasyVulkanAdapter {
+    std::string id,name;
+};
+std::vector<EcstasyVulkanAdapter> ecstasyVulkanAdapters();
 struct EcstasyVulkanOptions {
     std::uint32_t width{1280},height{720};
     std::uint32_t logicalWidth{644},logicalHeight{480};
     bool vsync{true};
     void* nativeInstance{};
     void* nativeWindow{};
+    std::string adapterId;
     // Native PC quality controls. Authored preserves the released TEX1
     // path for source comparisons; the desktop launcher chooses its default.
     EcstasyTextureFilter textureFilter{EcstasyTextureFilter::Authored};
@@ -1169,10 +1193,9 @@ struct EcstasyVulkanOptions {
     // Maintainer serial/parallel parity control. Normal play automatically
     // partitions substantial draw runs across the available CPU budget.
     bool parallelCommandRecording{true};
-    // Opt-in transport experiment for maintainer parity/performance controls.
-    // The measured candidate did not improve total CPU time, so normal play
-    // keeps the direct path. Launcher and authored quality stay unchanged.
-    bool streamTransformBatching{false};
+    // Devices with both indirect-draw features can submit adjacent mesh
+    // ranges together. The direct path also serves as the parity reference.
+    bool streamTransformBatching{true};
     std::uint32_t anisotropy{16};
 };
 struct EcstasyVulkanColorReadback {
@@ -1192,8 +1215,10 @@ public:
     bool CanRenderPrepared() const noexcept;
     bool RenderPrepared();
     void InvalidatePrepared() noexcept;
+    void CollectCompletedSunDepth();
     void Resize(std::uint32_t width,std::uint32_t height);
     void ConfigurePresentation(bool vsync);
+    void SetSharpScaling(bool sharp) noexcept;
     void SetLogicalSize(std::uint32_t width,std::uint32_t height);
     std::uint32_t Width() const noexcept;
     std::uint32_t Height() const noexcept;
@@ -1310,6 +1335,7 @@ private:
     std::int32_t mode_{};
     std::array<EditorMarkerTexture*,5> trackTextures_{};
     SunGlareState glare_;
+    std::uint32_t visibleSunSamples_{};
     // PAL2E03D0:15 fixed zero-initialized tiles are application-owned,
     // independent of track resource loading and its borrowed SunInfo.
     std::shared_ptr<std::array<SunDepthSamples,15>> depthSamples_;

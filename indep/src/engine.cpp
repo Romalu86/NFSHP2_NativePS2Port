@@ -98,6 +98,7 @@ Engine* engineInitialize(Engine* engine, const EngineInfo* info,
     engine->nitroEnabled = 0;
     engine->nitroBoostTimer = 0.0f;
     engine->throttleOverride = 1.0f;
+    engine->proportionalLaunchWeight = 0.0f;
     return engine;
 }
 
@@ -126,7 +127,11 @@ float engineGetNetTorque(const Engine* engine)
 {
     const float output = engineGetCurrentOutputTorque(engine);
     const float throttle = bScalarMultiply(engine->throttle, engine->throttleOverride);
-    float driveTorque = bScalarMultiply(output, throttle);
+    // Give the low end of pedal travel more resolution over usable wheel
+    // torque at pull-away. The curve is continuous and preserves full power.
+    const float effectiveThrottle = throttle +
+        engine->proportionalLaunchWeight * throttle * (1.0f - engine->throttle);
+    float driveTorque = bScalarMultiply(output, effectiveThrottle);
     if (engine->nitroEnabled != 0)
         driveTorque = bScalarMultiply(driveTorque, 3.0f);
 
@@ -134,7 +139,9 @@ float engineGetNetTorque(const Engine* engine)
     const float rpm = bScalarMultiply(engine->angularVelocity, radiansPerSecondToRpm);
     const float braking = -sampledCurveEvaluate(&engine->braking, rpm);
     const float brakingThrottle = bScalarMultiply(engine->throttle, engine->throttleOverride);
-    const float brakeTorque = bScalarMultiply(braking, bScalarAdd(1.0f, -brakingThrottle));
+    float brakeTorque = bScalarMultiply(braking, bScalarAdd(1.0f, -brakingThrottle));
+    if (engine->proportionalLaunchWeight > 0.0f)
+        brakeTorque = brakeTorque * (1.0f - engine->proportionalLaunchWeight);
     float torque = bScalarAdd(driveTorque, brakeTorque);
     if (engine->vehicle->brakingMode == 1 && torque < 0.0f)
         torque = bScalarMultiply(torque, 0.4000000059604645f);
@@ -480,7 +487,7 @@ float driveTrainGetDrivenAngularAcceleration(const DriveTrain* driveTrain)
 
 int32_t driveTrainShouldDisengageAtIdle(const DriveTrain* driveTrain)
 {
-    if (!(driveTrain->engine->throttle < 0.30000001192092896f))
+    if (driveTrain->engine->proportionalLaunchWeight > 0.0f || !(driveTrain->engine->throttle < 0.30000001192092896f))
         return 0;
     const float idle = driveTrain->engine->info->idleRpm * 0.10471967607736588f;
     const float threshold = idle + 0.00009999999747378752f;
@@ -539,7 +546,8 @@ void driveTrainPrepareStep(DriveTrain* driveTrain)
     case 1:
         driveTrain->currentGear = driveTrain->desiredGear;
         engineSetThrottleOverride(engine, 0.0f);
-        if (driveTrain->reengageRequested || 0.30000001192092896f < engine->throttle) {
+        if (driveTrain->reengageRequested || engine->proportionalLaunchWeight > 0.0f ||
+            0.30000001192092896f < engine->throttle) {
             driveTrain->reengageRequested = 0;
             driveTrain->clutchState = 2;
         }
@@ -635,7 +643,13 @@ void driveTrainResolveForces(DriveTrain* driveTrain)
         }
         driveTrain->previousSlipRpm = slipRpm;
         const float coupling = bScalarMultiply(slip, stiffness);
-        driveTrainApplyTorque(driveTrain, bScalarMultiply(coupling, driveTrain->clutch));
+        float torque = bScalarMultiply(coupling, driveTrain->clutch);
+        if (engine->proportionalLaunchWeight > 0.0f && torque > 0.0f) {
+            // Clutch slip must not turn a light pedal into a full-torque launch.
+            const float pedalTorque = std::max(0.0f, engineGetNetTorque(engine));
+            torque -= std::max(0.0f, torque - pedalTorque) * engine->proportionalLaunchWeight;
+        }
+        driveTrainApplyTorque(driveTrain, torque);
     }
 }
 
@@ -690,7 +704,7 @@ int32_t driveTrainUpdateRequestedGear(DriveTrain* driveTrain, int32_t request,
         float lower;
         if (current >= 3)
             lower = driveTrain->shiftDownRpm[current];
-        else if (engine->throttle < 0.20000000298023224f)
+        else if (engine->proportionalLaunchWeight == 0.0f && engine->throttle < 0.20000000298023224f)
             lower = engine->info->idleRpm + 100.0f;
         else
             lower = 0.0f;
@@ -730,7 +744,7 @@ int32_t driveTrainUpdateRequestedGear(DriveTrain* driveTrain, int32_t request,
         const float overrev = maximum * driveTrain->tuning->downshiftOverrevMultiplier;
         const float currentProduct = overrev * driveTrain->info->gearRatios[current];
         lower = currentProduct / driveTrain->info->gearRatios[current - 1];
-    } else if (engine->throttle < 0.20000000298023224f) {
+    } else if (engine->proportionalLaunchWeight == 0.0f && engine->throttle < 0.20000000298023224f) {
         lower = idle + 100.0f;
     } else {
         lower = 0.0f;

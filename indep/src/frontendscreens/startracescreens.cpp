@@ -230,9 +230,9 @@ PreRaceStats::PreRaceStats(StartRaceScreens& owner,std::uint32_t screen)
         for (const auto key:{pos,name,type,status})resources.SetObjectVisibility(screen,key,row!=nullptr);
         if (!row)continue;
         resources.Printf(screen,pos,"%2d",row->position);
-        resources.Printf(screen,name,"%s",row->name);
         const auto& car=owner.services.frontend->raceSetup->cars->Car(static_cast<std::size_t>(row->model));
         resources.Printf(screen,type,"%s",GetTranslatedString(*ui.language,car.GetFullName(*ui.language)));
+        resources.SetFittedText(screen,name,ui.language,row->name,type);
         if (knockout)resources.SetLanguageID(screen,status,static_cast<std::uint32_t>(row->status));
         else if (tournament)resources.Printf(screen,status,"%d",row->points);
         else resources.SetObjectVisibility(screen,status,0);

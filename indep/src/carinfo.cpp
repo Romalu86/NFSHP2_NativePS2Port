@@ -429,7 +429,7 @@ void CarInfoResource::LoadSkins(const std::vector<std::uint8_t>& package,
         skin.displayName = Text(record + 8, 32);
         skin.selectionMask = ReadU32(record + 40);
         skin.lightMaterialKey = ReadU32(record + 44);
-        skin.authoredWord30 = ReadU32(record + 48);
+        skin.colorSwatchTextureKey = ReadU32(record + 48);
         Require(skin.modelCode >= 0 && skin.modelCode < static_cast<std::int32_t>(CarCount) &&
                 skin.skinNumber >= 0 && !skin.displayName.empty(), "SkinInfo identifier is invalid");
         Require(ReadU32(record + 52) == 0 && ReadU32(record + 56) == 0 && ReadU32(record + 60) == 0,
@@ -528,7 +528,7 @@ std::int32_t CarInfoResource::RandomSkin(std::size_t modelCode, bool alternatePu
 
 bool CarInfoResource::WeightedPickRide(CarAppearanceSelection& output, std::int32_t bodyCategory,
     std::int32_t routeVehicleClass, const RaceParameters& parameters,
-    const frontend::LanguageManager& language) const {
+    const frontend::LanguageManager& language,bool allowNfsEdition,bool allowCutTraffic) const {
     Require(carsLoaded_ && cars_.size() == CarCount, "Weighted car selection requires its canonical CarInfo owner");
     const std::int32_t category = parameters.selectedScenario / 10;
     const std::int32_t weight = category == 6 ? 4 : category - 1;
@@ -538,14 +538,21 @@ bool CarInfoResource::WeightedPickRide(CarAppearanceSelection& output, std::int3
             (routeVehicleClass == -1 || car.routeVehicleClass == routeVehicleClass) &&
             AvailableSkinCount(static_cast<std::size_t>(car.modelCode)) > 0;
     };
+    const auto selectionWeight=[&](const CarDefinition& car) {
+        const auto authored=car.selectionWeights[static_cast<std::size_t>(weight)];
+        if(authored!=0.0f)return authored;
+        if(allowNfsEdition && car.bodyCategory==0 && car.pursuitConfiguration)return 1.0f;
+        if(allowCutTraffic && car.bodyCategory==2 && IsRestoredTrafficModel(car.modelCode))return 1.0f;
+        return authored;
+    };
     float total = 0.0f;
     for (const auto& car : cars_)
-        if (eligible(car)) total = total + car.selectionWeights[static_cast<std::size_t>(weight)];
+        if (eligible(car)) total = total + selectionWeight(car);
     if (std::fabs(total) <= 0.0010000000474974513f) return false;
     float remaining = vectorDefaultRandomFloat(total);
     for (const auto& car : cars_) {
         if (!eligible(car)) continue;
-        remaining = remaining - car.selectionWeights[static_cast<std::size_t>(weight)];
+        remaining = remaining - selectionWeight(car);
         if (remaining <= 0.0f) {
             output.skinNumber = static_cast<std::int8_t>(RandomSkin(static_cast<std::size_t>(car.modelCode),
                 language.currentLanguage != 0));

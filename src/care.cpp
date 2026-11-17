@@ -82,6 +82,7 @@ struct CarAppearance {
 std::size_t carRenderNativeDetailLod(const EditorMarkerModel* models,
     std::int32_t originalPixels) noexcept
 {
+    if(hp2::nativeRenderSettings().maximumDetail)return 0;
     constexpr float minimumPixels[4]={120.0f,45.0f,20.0f,0.0f}; // PAL2AD0E8
     const auto detailPixels=hp2::nativeDetailLodPixels(originalPixels,
         hp2::nativeVehicleDetailDistanceFactor);
@@ -1093,16 +1094,17 @@ std::size_t renderCarSunShadow(CarAppearance& render,Car* car,const CarCinematic
         v.textureCoordinate={u,0.0f,1.0f};v.color=color;return v;
     };
     constexpr float edgeU=0.1550000011920929f;std::size_t submitted=0;
-    for(std::size_t i=0;i+1<(count&~std::size_t{1});i+=2) {
-        frame.RenderWorldStrip({vertex(smooth[i],edgeU),vertex(center,0.0f),
-            vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)},*texture,eMathIdentityMatrix,view);++submitted;
-    }
-    if(count&1u) {
-        frame.RenderWorldStrip({vertex(smooth.back(),edgeU),vertex(center,0.0f),vertex(smooth.front(),edgeU)},
-            *texture,eMathIdentityMatrix,view);++submitted;
-    }
     const auto third=count/3;
     std::vector<hp2::frontend::FlailerPolyVertex> strip;strip.reserve((third+3)*2);
+    const auto centerVertex=vertex(center,0.0f);
+    for(std::size_t i=0;i+1<(count&~std::size_t{1});i+=2) {
+        strip={vertex(smooth[i],edgeU),centerVertex,vertex(smooth[i+1],edgeU),vertex(smooth[(i+2)%count],edgeU)};
+        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view);++submitted;
+    }
+    if(count&1u) {
+        strip={vertex(smooth.back(),edgeU),centerVertex,vertex(smooth.front(),edgeU)};
+        frame.RenderWorldStrip(strip,*texture,eMathIdentityMatrix,view);++submitted;
+    }
     for(std::size_t group=0;group<3;++group) {
         const auto begin=group*third,end=group==2 ? count:begin+third;
         strip.clear();
@@ -1210,11 +1212,19 @@ std::size_t renderCarRoadShadow(CarAppearance& render,Car* car,const CarCinemati
 }
 
 
+// Frame-local inputs shared by the main and rear cameras. The sampled
+// lighting queries depend on exact world position; each camera still
+// builds its own final lighting matrix and chooses its own LOD.
+struct CarRenderFrameInputs {
+    std::optional<hp2::LightContextBatch> lightContexts;
+    bool texturesUpdated{};
+};
 std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const float position[3],const float orientation[16],const float wheels[4][16],
     const float brakes[4][16],std::int32_t worldFrames,std::int32_t presentationLayout,
-    std::int32_t forcedLod,std::uint32_t sourceFlags,std::uint32_t lightFlags)
+    std::int32_t forcedLod,std::uint32_t sourceFlags,std::uint32_t lightFlags,
+    CarRenderFrameInputs* frameInputs=nullptr)
 {
     // PAL120EF8..12356C geometry/driver branches. Car projected shadows and
     // light-volume modifiers remain separate source dependencies.
@@ -1245,9 +1255,12 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
         nativeFrame->movement->bindings.owner==car && nativeFrame->movement->bindings.state &&
         nativeFrame->movement->bindings.controls && car->driverInfo),
         "Car light-state render lacks its actual frame/movement/selection owners");
-    updateCarRenderSceneTextures(render,car,nativeFrame ? &nativeFrame->state:nullptr,
-        car ? car->driverInfo->driverClass:0,
-        nativeFrame ? nativeFrame->movement->bindings.controls:nullptr,render.bindings->scenario,worldFrames);
+    if(!frameInputs || !frameInputs->texturesUpdated) {
+        updateCarRenderSceneTextures(render,car,nativeFrame ? &nativeFrame->state:nullptr,
+            car ? car->driverInfo->driverClass:0,
+            nativeFrame ? nativeFrame->movement->bindings.controls:nullptr,render.bindings->scenario,worldFrames);
+        if(frameInputs)frameInputs->texturesUpdated=true;
+    }
     // Explicit PC-quality presentation adaptation. Retain the PAL pixel
     // radius for culling, flares, damage, driver and lighting decisions;
     // apply the native distance preference to body/wheel mesh LOD only.
@@ -1296,12 +1309,16 @@ std::size_t renderCarAppearanceScene(CarAppearance& render,Car* car,
     // matrix2D70F0. The same elSetupLightContext owns frontend presets.
     const auto applicationState=render.bindings && render.bindings->applicationState ?
         *render.bindings->applicationState:0;
-    hp2::LightContextBatch lightContexts(render.textures->Lights());
+    std::optional<hp2::LightContextBatch> localLightContexts;
+    auto& lightStorage=frameInputs ? frameInputs->lightContexts:localLightContexts;
+    if(!lightStorage)lightStorage.emplace(render.textures->Lights());
+    auto& lightContexts=*lightStorage;
     const auto bodyLighting=lightContexts.Setup(transform,
         frame.EnvironmentMatrix(),view.view->current.eye,view,applicationState);
     const std::uint32_t environmentFlags=
         hp2::environmentMappingEnabled && pixels>=18 ? 0u:1u;
     const auto draw=[&](std::size_t slot,const float* matrix,std::uint32_t flags=0u,float alpha=1.0f) {
+        if(!render.models[slot].solid)return std::size_t{0};
         std::optional<hp2::SceneLightContext> partLighting;
         const hp2::SceneLightContext* context=nullptr;
         if(slot<4 || (slot>=16 && slot<=19))context=&bodyLighting;
@@ -1630,9 +1647,10 @@ void UpdateEnvironmentMapCameras(EnvironmentMap& environment,CarCinematicService
 }
 }
 
-void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
+static void renderCarsForView(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const GameTime& clock,std::int32_t presentationLayout,
-    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views)
+    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views,
+    std::array<CarRenderFrameInputs,WORLD_MAX_CARS>* frameInputs)
 {
     // PAL124060..1242A4: intrusive World list, hidden camera car, original
     // view-mask cells, physical wheel matrices and subsequent DamageAbove.
@@ -1666,7 +1684,12 @@ void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& f
         // PAL1241B0 supplies Car+50 (COM-adjusted model origin), not Car+60.
         const auto* position=overridePose ? presentation->centerPosition:mover->bindings.state->centerPosition;
         const auto* orientation=overridePose ? presentation->orientation:mover->bindings.state->orientation;
-        carRenderScene(*car,view,frame,position,orientation,wheels,brakes,clock.worldTimeFrames,presentationLayout);
+        hp2::Require(car->appearance,"Car rendering has no canonical appearance owner");
+        CarRenderFrameInputs* inputs=nullptr;
+        if(frameInputs && car->tableIndex<frameInputs->size() && world.carTable[car->tableIndex]==car)
+            inputs=&(*frameInputs)[car->tableIndex];
+        renderCarAppearanceScene(*car->appearance,car,view,frame,position,orientation,wheels,brakes,
+            clock.worldTimeFrames,presentationLayout,-1,0,0,inputs);
         if(damageDisplay) {
             bool suppress=false;
             for(int32_t i=0;i<damageDisplay->players.count;++i)if(const auto* player=damageDisplay->players.players[i])
@@ -1675,6 +1698,28 @@ void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& f
                 }
             if(!suppress)car->DamageAbove(view.view->current.eye,view.view->current.forward,*damageDisplay);
         }
+    }
+}
+
+void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
+    const GameTime& clock,std::int32_t presentationLayout,
+    const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views)
+{
+    renderCarsForView(world,view,frame,clock,presentationLayout,damageDisplay,views,nullptr);
+}
+
+void RenderCarsForViews(World& world,CarCinematicServices& cameras,hp2::EcstasyFrame& frame,
+    const GameTime& clock,const hp2::CarDamageDisplayBindings& display,
+    CarViewMoverRegistry* views)
+{
+    std::array<CarRenderFrameInputs,WORLD_MAX_CARS> frameInputs;
+    for(std::size_t i=1;i<4;++i) {
+        auto& view=cameras.screens[i];
+        if(!view.enabled || !view.view || !view.target || !view.target->enabled)continue;
+        ecstasyViewSetCurrent(&cameras,&view);
+        const hp2::CarDamageDisplayBindings viewDisplay{display.resources,display.parameters,
+            display.sessionState,display.players,display.pursuit,view,frame};
+        renderCarsForView(world,view,frame,clock,cameras.presentationLayout,&viewDisplay,views,&frameInputs);
     }
 }
 

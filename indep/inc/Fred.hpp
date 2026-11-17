@@ -195,20 +195,6 @@ struct FrontendRaceSetupOptions {
     std::array<std::int32_t,2> freeRun{{3,0}};
     std::array<std::int32_t,4> beTheCop{{2,0,1,0}};
 };
-// A native-race policy: PAL Quick Game and Event Tree do not expose a
-// Catch Up selector. In the PC port these non-configurable modes cannot
-// silently turn rubber-banding on. Challenge setup (3/4/5/7) keeps the
-// player's authored per-mode option unless the launcher explicitly overrides.
-inline bool RaceHasCatchUpChoice(std::int32_t gameType) noexcept
-{
-    return gameType==3 || gameType==4 || gameType==5 || gameType==7;
-}
-inline bool ShouldDisableRaceCatchUp(std::int32_t gameType,bool launcherDisabled) noexcept
-{
-    return gameType>=2 && gameType<=9 &&
-        (launcherDisabled || !RaceHasCatchUpChoice(gameType));
-}
-
 struct FrontendPlayerManager {
     // Final HandleLanguageChange21E210 writes FRED+174 (2FC1C4).
     // This is the live profile cell, independent of manager currentLanguage.
@@ -234,7 +220,7 @@ struct FrontendPlayerManager {
     // Same profile cells consumed by the record display: source FRED+1C and
     // FRED+100B8,128 retained names of12 bytes. These are not UI copies.
     std::int32_t recordDisplaySuppressed{};
-    std::array<std::array<char,12>,128> recordPlayerNames{};
+    std::array<std::array<char,PLAYER_NAME_CAPACITY>,128> recordPlayerNames{};
     FrontendMusicSettings musicSettings{};
     // Final FRED+20 and FRED+106B8/+106E0. These are the profile's actual
     // cops-on selection and earned-reward banks, not derived UI caches.
@@ -253,12 +239,14 @@ struct FrontendPlayerManager {
     std::array<std::int32_t,2> joystickConfigurations{{0,0}};
     void SetupRaceParametersAfterRaceSetup(const FrontendRaceSetupBindings& bindings);
     void InitWithDefaults(const FrontendRaceSetupBindings& bindings);
-    std::array<std::uint8_t,GAME_SAVE_SIZE> SerializeNativeProfile() const;
+    using NativeProfileImage=std::array<std::uint8_t,
+        GAME_SAVE_SIZE+(std::tuple_size_v<decltype(recordPlayerNames)>+2)*(PLAYER_NAME_CAPACITY-12)>;
+    NativeProfileImage SerializeNativeProfile() const;
     bool DeserializeNativeProfile(const void* data,std::size_t bytes,std::string& error);
     // PC persistence stores named UTF-8 JSON. Legacy NFRED57 images are
     // read-only migration input; these adapters add no accepted ELF bodies.
     std::string SerializeNativeProfileText() const;
-    bool ValidateNativeProfileText(const void* data,std::size_t bytes,std::string& error) const;
+    bool ValidateNativeProfileText(const void* data,std::size_t bytes,std::string& error,std::string* playerName=nullptr) const;
     bool DeserializeNativeProfileText(const void* data,std::size_t bytes,std::string& error);
     bool ConvertLegacyProfileToText(const void* data,std::size_t bytes,std::string& text,std::string& error) const;
     void CaptureAudioOptions(const ::CarSoundBindings& sound,bool rebuildMusicList);

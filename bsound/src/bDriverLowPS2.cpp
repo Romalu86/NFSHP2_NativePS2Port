@@ -616,6 +616,10 @@ size_t NativeSoundBankCache::ResidentBytes() const
 #include <windows.h>
 #include <objbase.h>
 #include <xaudio2.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <wrl/client.h>
+#include <atomic>
 #include <xaudio2fx.h>
 #include <xapo.h>
 #include "bsound/include/NativeAudioCom.hpp"
@@ -687,13 +691,54 @@ NativeReverbParameters defaultNativeReverb() noexcept
 // Native Windows endpoint. The owner applies retained audio requests to
 // XAudio2 source voices and keeps PCM buffers alive until their consumers
 // finish or physical voice destruction joins their final borrow.
+namespace {
+std::wstring RadioEndpoint(std::wstring_view controller)
+{
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if(FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&enumerator))))return {};
+    ComPtr<IMMDeviceCollection> endpoints;
+    if(FAILED(enumerator->EnumAudioEndpoints(eRender,DEVICE_STATE_ACTIVE,&endpoints)))return {};
+    UINT count{};
+    if(FAILED(endpoints->GetCount(&count)))return {};
+    std::wstring selected;
+    for(UINT index=0;index<count;++index) {
+        ComPtr<IMMDevice> endpoint;
+        ComPtr<IPropertyStore> properties;
+        if(FAILED(endpoints->Item(index,&endpoint)) ||
+            FAILED(endpoint->OpenPropertyStore(STGM_READ,&properties)))continue;
+        PROPVARIANT property{};
+        const auto result=properties->GetValue(PKEY_Device_ContainerId,&property);
+        wchar_t container[39]{};
+        if(SUCCEEDED(result) && property.vt==VT_CLSID && property.puuid)
+            StringFromGUID2(*property.puuid,container,39);
+        const bool matches=controller==std::wstring_view(container) ||
+            (SUCCEEDED(result) && property.vt==VT_LPWSTR && property.pwszVal &&
+                CompareStringOrdinal(controller.data(),static_cast<int>(controller.size()),
+                    property.pwszVal,-1,TRUE)==CSTR_EQUAL);
+        PropVariantClear(&property);
+        if(!matches)continue;
+        // A controller normally advertises one active render endpoint.
+        // Refuse an ambiguous association instead of guessing by its name.
+        if(!selected.empty())return {};
+        LPWSTR id{};
+        if(SUCCEEDED(endpoint->GetId(&id))) {
+            const std::unique_ptr<wchar_t,decltype(&CoTaskMemFree)> owned(id,CoTaskMemFree);
+            selected=id;
+        }
+    }
+    return selected;
+}
+}
+
 struct bSound::NativeDevice {
     struct Voice {
         IXAudio2SourceVoice* device{};
+        IXAudio2SourceVoice* radio{};
         hp2::audio::NativeGainXapo* envelope{};
         hp2::audio::NativeWineHostEnvelope hostEnvelope{};
         hp2::audio::NativeWinePcmAttack pcmAttack{};
-        std::shared_ptr<hp2::audio::PcmWave> wineResidentPcm;
         WorldAudioVoiceRef sample{};
         uint64_t sequence{};
         const WorldAudioBank* bank{};
@@ -723,6 +768,17 @@ struct bSound::NativeDevice {
     std::thread::id thread{std::this_thread::get_id()};
     IXAudio2* engine{};
     IXAudio2MasteringVoice* master{};
+    struct RadioCallbacks final : IXAudio2EngineCallback {
+        std::atomic<bool> failed{false};
+        void STDMETHODCALLTYPE OnProcessingPassStart() noexcept override {}
+        void STDMETHODCALLTYPE OnProcessingPassEnd() noexcept override {}
+        void STDMETHODCALLTYPE OnCriticalError(HRESULT) noexcept override {failed=true;}
+    } radioCallbacks;
+    IXAudio2* radioEngine{};
+    IXAudio2MasteringVoice* radioMaster{};
+    std::wstring radioController;
+    ULONGLONG radioRetry{};
+    float masterGain{1.0f},radioGain{1.0f};
     hp2::audio::NativeOutputClock outputClock;
     std::array<EffectBus,2> effects{};
     bool com{};
@@ -738,17 +794,81 @@ struct bSound::NativeDevice {
     ~NativeDevice()
     {
         if (std::this_thread::get_id()!=thread)std::terminate();
-        // A Wine XAudio2_9 audio worker was observed faulting while terminal
-        // owners retired (0xC0000005 in XAudio2_9.dll). Stop its engine thread
-        // before any voice/effect destruction; Microsoft XAudio2 retains the
-        // unchanged source ownership and teardown sequence.
+        // Stop the Wine audio worker before retiring the voices it uses.
         if (wineAudio && engine)engine->StopEngine();
         for (auto& voice:voices)destroy(voice);
+        closeRadio();
         // Sources must release their actual send destinations first.
         for (auto& effect:effects)if(effect.device)effect.device->DestroyVoice();
         if (master)master->DestroyVoice();
         if (engine)engine->Release();
         if (com)CoUninitialize();
+    }
+    void detachRadio(Voice& voice) noexcept
+    {
+        if(!voice.radio)return;
+        voice.radio->DestroyVoice();
+        voice.radio=nullptr;
+        if(voice.device)(void)voice.device->SetVolume(1.0f);
+    }
+    void closeRadio() noexcept
+    {
+        for(auto& voice:voices)detachRadio(voice);
+        if(radioMaster)radioMaster->DestroyVoice();
+        if(radioEngine) {
+            radioEngine->UnregisterForCallbacks(&radioCallbacks);
+            radioEngine->Release();
+        }
+        radioMaster=nullptr;radioEngine=nullptr;
+    }
+    void applyRadioGain() noexcept
+    {
+        if(radioMaster)(void)radioMaster->SetVolume(masterGain*radioGain);
+    }
+    void setRadioController(std::wstring_view container,float gain)
+    {
+        // The controller speaker uses the Windows USB audio endpoint.
+        if(wineAudio)return;
+        if(radioController!=container) {
+            closeRadio();
+            radioController=container;
+            radioRetry=0;
+        }
+        if(radioGain!=gain) {
+            radioGain=gain;
+            applyRadioGain();
+        }
+        if(container.empty())return;
+        const auto now=GetTickCount64();
+        if(radioEngine) {
+            if(!radioCallbacks.failed.load())return;
+            closeRadio();
+            radioRetry=now+1000;
+        }
+        if(now<radioRetry)return;
+        radioRetry=now+2000;
+        const auto endpoint=RadioEndpoint(container);
+        if(endpoint.empty())return;
+        radioCallbacks.failed=false;
+        if(FAILED(XAudio2Create(&radioEngine,0,XAUDIO2_DEFAULT_PROCESSOR)))return;
+        if(FAILED(radioEngine->RegisterForCallbacks(&radioCallbacks)) ||
+            FAILED(radioEngine->CreateMasteringVoice(&radioMaster,2,48000,0,endpoint.c_str(),nullptr,
+                AudioCategory_GameEffects))) {
+            closeRadio();
+            return;
+        }
+        applyRadioGain();
+    }
+    void prepareRadio(Voice& voice, const hp2::audio::PcmWave& pcm) noexcept
+    {
+        if(!radioMaster || pcm.channels!=1 || voice.radio)return;
+        WAVEFORMATEX format{};
+        format.wFormatTag=WAVE_FORMAT_PCM;format.nChannels=1;
+        format.nSamplesPerSec=pcm.sampleRate;format.wBitsPerSample=16;
+        format.nBlockAlign=2;format.nAvgBytesPerSec=pcm.sampleRate*2;
+        if(FAILED(radioEngine->CreateSourceVoice(&voice.radio,&format,0,XAUDIO2_MAX_FREQ_RATIO)))return;
+        const float speakerOnly[]{0.0f,1.0f};
+        if(FAILED(voice.radio->SetOutputMatrix(radioMaster,1,2,speakerOnly)))detachRadio(voice);
     }
     static void checked(HRESULT result,const char* reason)
     {
@@ -876,6 +996,7 @@ struct bSound::NativeDevice {
         if (voice.fileRead.valid())voice.fileRead.wait();
         // DestroyVoice waits until the processing thread no longer borrows
         // the source data. Only then may stream PCM and bank views expire.
+        detachRadio(voice);
         if (voice.device)voice.device->DestroyVoice();
         if (voice.envelope)voice.envelope->Release();
         voice=Voice{};
@@ -914,21 +1035,18 @@ struct bSound::NativeDevice {
         if(voice.effectCore>=0)descriptors[1].pOutputVoice=effects[static_cast<size_t>(voice.effectCore)].device;
         XAUDIO2_VOICE_SENDS sends{voice.effectCore>=0 ? 2u:1u,descriptors.data()};
         const auto authoredEnvelope=hp2::audio::CaptureVoiceEnvelope(operation);
-        // The Wine FAudio bridge can acknowledge custom XAPO graphs without
-        // providing their output to the sink. Keep the real XAudio2 PCM and
-        // authored sends, but use its native source gain instead of attaching
-        // an application XAPO on Wine. Windows retains its original DSP path.
-        voice.hostEnvelope.Configure(authoredEnvelope,rate);
-        voice.pcmAttack.Configure(authoredEnvelope,rate);
         XAUDIO2_EFFECT_DESCRIPTOR envelopeDescriptor{};
         XAUDIO2_EFFECT_CHAIN envelopeChain{};
-        if (!wineAudio) {
+        if (wineAudio) {
+            voice.hostEnvelope.Configure(authoredEnvelope,rate);
+            voice.pcmAttack.Configure(authoredEnvelope,rate);
+        } else {
             voice.envelope=new hp2::audio::NativeGainXapo(outputClock,authoredEnvelope);
             envelopeDescriptor={voice.envelope,TRUE,channels};
             envelopeChain={1,&envelopeDescriptor};
         }
         checked(engine->CreateSourceVoice(&voice.device,&format,0,XAUDIO2_MAX_FREQ_RATIO,
-            nullptr,&sends,wineAudio ? nullptr:&envelopeChain),
+            nullptr,&sends,wineAudio?nullptr:&envelopeChain),
             "XAudio2 CreateSourceVoice failed");
         voice.sequence=operation.sequence;voice.bank=operation.bank;
         voice.rate=rate;
@@ -961,6 +1079,8 @@ struct bSound::NativeDevice {
 
     void matrix(Voice& voice)
     {
+        if(voice.radio && FAILED(voice.radio->SetVolume(static_cast<float>(voice.mix.volume)/16383.0f)))
+            detachRadio(voice);
         const auto coefficients=voice.mix.Coefficients();
         // XAudio2/FAudio validates routing against the *current* send list.
         // A source voice can retain an obsolete send association after a
@@ -1011,11 +1131,8 @@ struct bSound::NativeDevice {
     }
     void updateWineGain(Voice& voice)
     {
-        if (!wineAudio || !voice.device || (!voice.started && !voice.releaseTail) || voice.paused)return;
+        if (!voice.device || (!voice.started && !voice.releaseTail) || voice.paused)return;
         XAUDIO2_VOICE_STATE state{};
-        // SamplesPlayed, unlike a game frame or a queued-request counter, is
-        // advanced only by actual XAudio2 device consumption. Do not request
-        // XAUDIO2_VOICE_NOSAMPLESPLAYED here.
         voice.device->GetState(&state);
         checked(voice.device->SetVolume(voice.hostEnvelope.Observe(state.SamplesPlayed)),
             "Wine native PCM source gain failed");
@@ -1026,6 +1143,7 @@ struct bSound::NativeDevice {
         if (ratio<XAUDIO2_MIN_FREQ_RATIO || ratio>XAUDIO2_MAX_FREQ_RATIO)
             throw Failure{WORLD_AUDIO_INVALID_BINDING,E_INVALIDARG,"Authored sound pitch exceeds device range"};
         checked(voice.device->SetFrequencyRatio(ratio),"XAudio2 frequency ratio failed");
+        if(voice.radio && FAILED(voice.radio->SetFrequencyRatio(ratio)))detachRadio(voice);
     }
     void submit(Voice& voice,const hp2::audio::PcmWave& pcm,bool last,bool loop)
     {
@@ -1042,6 +1160,7 @@ struct bSound::NativeDevice {
             buffer.LoopLength=pcm.loopEndFrame-pcm.loopStartFrame;
         }
         checked(voice.device->SubmitSourceBuffer(&buffer),"XAudio2 PCM submission failed");
+        if(voice.radio && FAILED(voice.radio->SubmitSourceBuffer(&buffer)))detachRadio(voice);
     }
     static size_t cueOffset(const WorldAudioBank& bank,const WorldAudioCue& cue)
     {
@@ -1147,7 +1266,7 @@ struct bSound::NativeDevice {
                 // Original loopless EOF ends gain immediately. A drained
                 // source cannot retain a tail while waiting for a future
                 // source-APO Process that the device need not supply.
-                if (!tailState.BuffersQueued || (wineAudio ? voice.hostEnvelope.Finished() : voice.envelope->Finished())) {
+                if (!tailState.BuffersQueued || (wineAudio?voice.hostEnvelope.Finished():voice.envelope->Finished())) {
                     if (voice.releaseAfterTail) { destroy(voice);continue; }
                     checked(voice.device->Stop(),"XAudio2 completed release stop failed");
                     checked(voice.device->FlushSourceBuffers(),"XAudio2 completed release flush failed");
@@ -1161,11 +1280,10 @@ struct bSound::NativeDevice {
             refillMovie(voice);refillFile(voice);
             XAUDIO2_VOICE_STATE state{};
             voice.device->GetState(&state,XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            const bool buffered=state.BuffersQueued!=0;
-            if (!buffered) {
-                voice.residentPcm.reset();
-                voice.wineResidentPcm.reset();
-            }
+            XAUDIO2_VOICE_STATE radioState{};
+            if(voice.radio)voice.radio->GetState(&radioState,XAUDIO2_VOICE_NOSAMPLESPLAYED);
+            const bool buffered=state.BuffersQueued!=0 || radioState.BuffersQueued!=0;
+            if (!buffered)voice.residentPcm.reset();
             // A successful XAudio2 Start stays armed during callback starvation:
             // a movie has no END_OF_STREAM buffer until its owning Close/STOP.
             // This preserves that actual started operation, while readiness
@@ -1200,9 +1318,6 @@ struct bSound::NativeDevice {
             checked(XAudio2Create(&engine,0,XAUDIO2_DEFAULT_PROCESSOR),"XAudio2 engine creation failed");
             // The native endpoint uses two channels at 48 kHz; every
             // source retains its actual authored rate.
-            // A custom mastering-voice XAPO is not required by the Wine path:
-            // source gain uses actual SamplesPlayed, so both COM/XAPO bridge
-            // lifetime and clock effects are absent from that graph.
             if (wineAudio) {
                 checked(engine->CreateMasteringVoice(&master,2,48000,0,nullptr,nullptr,
                     AudioCategory_GameEffects),"Wine physical mastering endpoint creation failed");
@@ -1270,13 +1385,12 @@ struct bSound::NativeDevice {
                 auto pcm=bank->second.Acquire(cueOffset(*operation.bank,*operation.cue));
                 voice=&allocate(operation,pcm->sampleRate,pcm->channels);
                 if (wineAudio) {
-                    voice->wineResidentPcm=std::make_shared<hp2::audio::PcmWave>(*pcm);
-                    voice->pcmAttack.Apply(voice->wineResidentPcm->samples,voice->mix.channels);
-                    submit(*voice,*voice->wineResidentPcm,true,hp2::audio::GetLoop(operation.cue->metadata[0x21])!=0);
-                } else {
-                    voice->residentPcm=std::move(pcm);
-                    submit(*voice,*voice->residentPcm,true,hp2::audio::GetLoop(operation.cue->metadata[0x21])!=0);
+                    auto shaped=std::make_shared<hp2::audio::PcmWave>(*pcm);
+                    voice->pcmAttack.Apply(shaped->samples,voice->mix.channels);
+                    pcm=std::move(shaped);
                 }
+                voice->residentPcm=std::move(pcm);
+                submit(*voice,*voice->residentPcm,true,hp2::audio::GetLoop(operation.cue->metadata[0x21])!=0);
             } else if (!voice || !voice->opened) {
                 throw Failure{WORLD_AUDIO_INVALID_BINDING,E_FAIL,"Stream PLAY has no actual prebuffered device source"};
             }
@@ -1289,6 +1403,8 @@ struct bSound::NativeDevice {
                 voice->hostEnvelope.KeyOn(state.SamplesPlayed);
                 checked(voice->device->SetVolume(1.0f),"Wine native PCM source key-on failed");
             } else voice->envelope->KeyOn();
+            if(voice->radio && (FAILED(voice->radio->Start()) || FAILED(voice->device->SetVolume(0.0f))))
+                detachRadio(*voice);
             checked(voice->device->Start(),"XAudio2 source start failed");
             voice->started=true;voice->paused=false;voice->releaseTail=false;voice->releaseAfterTail=false;
             voice->sequence=operation.sequence;
@@ -1330,6 +1446,10 @@ struct bSound::NativeDevice {
                 create(*voice,operation,pcm.sampleRate,pcm.channels,false);
                 voice->sequence=sequence; // Same PRIME association until final OPEN.
             } else if (!append)voice=&allocate(operation,pcm.sampleRate,pcm.channels);
+            // Only the localized pursuit speech chain uses this completion
+            // owner. Cinematics, announcer samples and music stay on the PC.
+            if(!append && operation.instance->completionKind==WORLD_AUDIO_COMPLETION_SPEECH)
+                prepareRadio(*voice,pcm);
             if (voice->streamBuffers.size()>=XAUDIO2_MAX_QUEUED_BUFFERS)
                 throw Failure{WORLD_AUDIO_CAPACITY,E_OUTOFMEMORY,"Chain exceeds actual device buffer capacity"};
             voice->streamBuffers.push_back(std::move(pcm));
@@ -1357,7 +1477,8 @@ struct bSound::NativeDevice {
             }
             XAUDIO2_VOICE_STATE state{};
             voice->device->GetState(&state,XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            const bool tail=voice->started && !voice->paused && state.BuffersQueued;
+            const bool tail=!voice->radio && voice->started && !voice->paused && state.BuffersQueued;
+            detachRadio(*voice);
             if (tail) {
                 // STREAM command4 keys resident voices off without zeroing
                 // gain. Stream command5 replaces release with rate0. Both
@@ -1399,6 +1520,10 @@ struct bSound::NativeDevice {
             auto& voice=requireVoice(operation);const bool paused=operation.parameterValue!=0.0f;
             if (paused)checked(voice.device->Stop(),"XAudio2 pause failed");
             else if (voice.started)checked(voice.device->Start(),"XAudio2 resume failed");
+            if(voice.radio) {
+                const auto result=paused?voice.radio->Stop():voice.started?voice.radio->Start():S_OK;
+                if(FAILED(result))detachRadio(voice);
+            }
             voice.paused=paused;return;
         }
         case WORLD_AUDIO_SET_MUTED: {
@@ -1450,7 +1575,7 @@ struct bSound::NativeDevice {
             // This never advances world/input clocks or invents readiness.
             for (auto& voice:voices)if (voice.device) {
                 refillFile(voice);
-                updateWineGain(voice);
+                if (wineAudio)updateWineGain(voice);
             }
             const auto result=commands.Pump(queue,maximum,[&](const WorldAudioRequest& operation) {
                 using Applied=hp2::audio::NativeAudioApply;
@@ -1542,6 +1667,22 @@ WorldAudioResult bSound::OpenWindowsDevice()
         if(windowsDevice_)return closed;
     }
     return result;
+}
+
+WorldAudioResult bSound::SetWindowsMasterVolume(float gain)
+{
+    if(!windowsDevice_ || !windowsDevice_->master || gain<0.0f || gain>1.0f || !std::isfinite(gain))
+        return WORLD_AUDIO_INVALID_BINDING;
+    if(FAILED(windowsDevice_->master->SetVolume(gain)))return WORLD_AUDIO_RESOURCE_FAILURE;
+    windowsDevice_->masterGain=gain;
+    windowsDevice_->applyRadioGain();
+    return WORLD_AUDIO_OK;
+}
+
+void bSound::SetWindowsRadioController(std::wstring_view container,float gain)
+{
+    if(windowsDevice_ && windowsDevice_->thread==std::this_thread::get_id())
+        windowsDevice_->setRadioController(container,std::clamp(gain,0.0f,1.0f));
 }
 
 WorldAudioResult bSound::PumpWindowsDevice(size_t maximumOperations)

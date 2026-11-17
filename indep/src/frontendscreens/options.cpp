@@ -1,4 +1,6 @@
 #include "FMenus.hpp"
+#include "Flags.hpp"
+#include "Language.hpp"
 #include "FEAnim.hpp"
 #include "Fred.hpp"
 #include "NativeAudioProfileValidation.hpp"
@@ -94,7 +96,7 @@ bool DifferentPlayerSettings(const PlayerSettings& a,const PlayerSettings& b)
         std::tie(b.inputProfile,b.authoredOption,b.initialVehicleMode,b.gearInputMode,
         b.cameraView,b.alternateCamera,b.splitTimeMode,b.authoredTimeDisplayOption,
         b.cameraSpring,b.lookback,b.hudFlags,b.bestTotalTimeTicks,b.bestLapTimeTicks,
-        b.hudHotkey,b.scoring) || DifferentData(a.playerName,b.playerName,12);
+        b.hudHotkey,b.scoring) || DifferentData(a.playerName,b.playerName,PLAYER_NAME_CAPACITY);
 }
 }
 
@@ -191,6 +193,1133 @@ void OptionsScreenBase::BaseCallback(ScreenMessage message,ScreenCallbackData* d
     optionsOwner->FirstCrackAtMessage(message,*data);
 }
 
+
+namespace {
+using Translation=std::array<const char*,6>;
+enum class PcOption {
+    Resolution,Window,Vsync,FrameLimit,Distance,Hud,RenderScale,Antialiasing,Anisotropy,Fps,
+    ResolutionPage,Aspect,Scaling,Detail,Reflections,Advanced,AntialiasPage,Quality,Brightness,Contrast,Gamma,PictureDefaults,
+    Player,Keyboard,Gamepad,Deadzone,Steering,IconStyle,Layouts,PadDefaults,Player2Pad,KeyboardDefaults,InputMode,
+    AdaptiveTriggers,PoliceRadioSpeaker,PoliceRadioVolume,
+    Profile,NewProfile,SaveLoad,Name,
+    Audio,Controls,Graphics,Profiles,Languages,Credits,
+    English,French,German,Italian,Spanish,Swedish,ZoneFreeze,ZoneZoom,
+    Accelerate,Brake,SteerLeft,SteerRight,Handbrake,Camera,ShiftUp,ShiftDown,LookBack,Horn,Nitro,Reset,HudToggle
+};
+struct PcOptionLabel {
+    PcOption option;
+    Translation text;
+};
+constexpr PcOptionLabel Labels[]{
+    {PcOption::Resolution,{"Resolution","Resolution","Aufloesung","Risoluzione","Resolucion","Upplosning"}},
+    {PcOption::Window,{"Window","Mode d'affichage","Bildschirmmodus","Modalita schermo","Modo de pantalla","Skarmtyp"}},
+    {PcOption::Vsync,{"VSync","VSync","VSync","VSync","VSync","VSync"}},
+    {PcOption::FrameLimit,{"Frame limit","Limite d'IPS","Bildratenlimit","Limite FPS","Limite de FPS","Bildrutetak"}},
+    {PcOption::Distance,{"Draw distance","Distance d'affichage","Sichtweite","Distanza visiva","Distancia visual","Siktavstand"}},
+
+    {PcOption::ResolutionPage,{"Resolution","Resolution","Aufloesung","Risoluzione","Resolucion","Upplosning"}},
+    {PcOption::Aspect,{"Aspect ratio","Format d'image","Seitenverhaeltnis","Proporzioni","Relacion de aspecto","Bildformat"}},
+    {PcOption::Scaling,{"Scaling","Mise a l'echelle","Skalierung","Ridimensionamento","Escalado","Skalning"}},
+    {PcOption::Detail,{"Level of detail","Niveau de detail","Detailgrad","Livello dettaglio","Nivel de detalle","Detaljniva"}},
+    {PcOption::Reflections,{"Reflections","Reflets","Reflexionen","Riflessi","Reflejos","Reflektioner"}},
+    {PcOption::Advanced,{"Advanced","Avance","Erweitert","Avanzate","Avanzado","Avancerat"}},
+    {PcOption::AntialiasPage,{"Antialiasing","Anticrenelage","Kantenglaettung","Antialiasing","Suavizado","Kantutjamning"}},
+    {PcOption::Quality,{"Quality","Qualite","Qualitaet","Qualita","Calidad","Kvalitet"}},
+    {PcOption::Brightness,{"Brightness","Luminosite","Helligkeit","Luminosita","Brillo","Ljusstyrka"}},
+    {PcOption::Contrast,{"Contrast","Contraste","Kontrast","Contrasto","Contraste","Kontrast"}},
+    {PcOption::Gamma,{"Gamma","Gamma","Gamma","Gamma","Gamma","Gamma"}},
+    {PcOption::PictureDefaults,{"Defaults","Valeurs par defaut","Standard","Predefiniti","Predeterminados","Standard"}},
+    {PcOption::Audio,{"Audio","Audio","Audio","Audio","Audio","Ljud"}},
+    {PcOption::Controls,{"Controls","Commandes","Steuerung","Comandi","Controles","Kontroller"}},
+    {PcOption::Graphics,{"Graphics","Graphismes","Grafik","Grafica","Graficos","Grafik"}},
+    {PcOption::Profiles,{"Profiles","Profils","Profile","Profili","Perfiles","Profiler"}},
+    {PcOption::Languages,{"Languages","Langues","Sprachen","Lingue","Idiomas","Sprak"}},
+    {PcOption::Credits,{"Credits","Credits","Mitwirkende","Crediti","Creditos","Medverkande"}},
+    {PcOption::Hud,{"HUD","Interface","Instrumente","Indicatori","Indicadores","Instrument"}},
+    {PcOption::RenderScale,{"Render scale","Echelle de rendu","Renderskalierung","Scala rendering","Escala de render","Renderingsskala"}},
+    {PcOption::Antialiasing,{"Anti-aliasing","Anticrenelage","Kantenglaettung","Antialiasing","Suavizado","Kantutjamning"}},
+    {PcOption::Anisotropy,{"Anisotropic filtering","Anisotropie","Anisotropie","Anisotropia","Anisotropia","Anisotropi"}},
+    {PcOption::Fps,{"Show FPS","Afficher les IPS","FPS anzeigen","Mostra FPS","Mostrar FPS","Visa FPS"}},
+    {PcOption::Player,{"Player","Joueur","Spieler","Giocatore","Jugador","Spelare"}},
+    {PcOption::Keyboard,{"Keyboard","Clavier","Tastatur","Tastiera","Teclado","Tangentbord"}},
+    {PcOption::Gamepad,{"Gamepad","Manette","Gamepad","Gamepad","Mando","Handkontroll"}},
+    {PcOption::AdaptiveTriggers,{"Adaptive Triggers","Gachettes adaptatives","Adaptive Trigger",
+        "Grilletti adattivi","Gatillos adaptativos","Adaptiva avtryckare"}},
+    {PcOption::PoliceRadioSpeaker,{"Police Radio Speaker","Radio sur la manette","Polizeifunk am Gamepad",
+        "Radio sul controller","Radio en el mando","Polisradio i handkontroll"}},
+    {PcOption::PoliceRadioVolume,{"Speaker Volume","Volume de la manette","Lautsprecherlautstaerke",
+        "Volume controller","Volumen del mando","Handkontrollens volym"}},
+    {PcOption::Deadzone,{"Steering deadzone","Zone morte direction","Lenktotzone","Zona morta sterzo","Zona muerta de giro","Styrningens dodzon"}},
+    {PcOption::Steering,{"Steering","Direction","Lenkung","Sterzo","Direccion","Styrning"}},
+    {PcOption::IconStyle,{"Button icons","Icones","Tastensymbole","Icone","Iconos","Knappikoner"}},
+    {PcOption::Layouts,{"Layouts","Disposition","Belegungen","Configurazioni","Esquemas","Layouter"}},
+    {PcOption::PadDefaults,{"Defaults","Valeurs par defaut","Standard","Predefiniti","Predeterminados","Standard"}},
+    {PcOption::KeyboardDefaults,{"Reset to default","Reinitialiser","Zuruecksetzen","Ripristina","Restaurar","Aterstall"}},
+    {PcOption::Player2Pad,{"Gamepad","Manette","Gamepad","Gamepad","Mando","Handkontroll"}},
+    {PcOption::InputMode,{"Input device","Peripherique","Eingabegeraet","Dispositivo","Dispositivo","Inmatningsenhet"}},
+    {PcOption::NewProfile,{"New profile","Nouveau profil","Neues Profil","Nuovo profilo","Nuevo perfil","Ny profil"}},
+    {PcOption::SaveLoad,{"Save / load progress","Sauvegarder / charger","Speichern / Laden","Salva / carica","Guardar / cargar","Spara / las in"}},
+    {PcOption::Name,{"Player names","Noms des joueurs","Spielernamen","Nomi giocatori","Nombres","Spelarnamn"}},
+    {PcOption::English,{"English","English","English","English","English","English"}},
+    {PcOption::French,{"Francais","Francais","Francais","Francais","Francais","Francais"}},
+    {PcOption::German,{"Deutsch","Deutsch","Deutsch","Deutsch","Deutsch","Deutsch"}},
+    {PcOption::Italian,{"Italiano","Italiano","Italiano","Italiano","Italiano","Italiano"}},
+    {PcOption::Spanish,{"Espanol","Espanol","Espanol","Espanol","Espanol","Espanol"}},
+    {PcOption::Swedish,{"Svenska","Svenska","Svenska","Svenska","Svenska","Svenska"}},
+    {PcOption::ZoneFreeze,{"Zone Freeze","Zone figee","Zone einfrieren","Blocca zona","Pausa de zona","Frys zon"}},
+    {PcOption::ZoneZoom,{"Zone Zoom","Zoom de zone","Zonenzoom","Zoom zona","Zoom de zona","Zonzoom"}},
+    {PcOption::Accelerate,{"Accelerate","Accelerer","Gas geben","Accelera","Acelerar","Gasa"}},
+    {PcOption::Brake,{"Brake / reverse","Freiner / reculer","Bremse / Rueckwaerts","Frena / retromarcia","Freno / marcha atras","Bromsa / backa"}},
+    {PcOption::SteerLeft,{"Steer left","Tourner a gauche","Nach links lenken","Sterza a sinistra","Girar a izquierda","Styr vanster"}},
+    {PcOption::SteerRight,{"Steer right","Tourner a droite","Nach rechts lenken","Sterza a destra","Girar a derecha","Styr hoger"}},
+    {PcOption::Handbrake,{"Handbrake","Frein a main","Handbremse","Freno a mano","Freno de mano","Handbroms"}},
+    {PcOption::Camera,{"Change camera","Changer de vue","Kamera wechseln","Cambia visuale","Cambiar camara","Byt kamera"}},
+    {PcOption::ShiftUp,{"Shift up","Monter un rapport","Hochschalten","Marcia superiore","Subir marcha","Vaxla upp"}},
+    {PcOption::ShiftDown,{"Shift down","Descendre un rapport","Herunterschalten","Marcia inferiore","Bajar marcha","Vaxla ned"}},
+    {PcOption::LookBack,{"Look back","Regarder derriere","Nach hinten sehen","Guarda indietro","Mirar atras","Se bakat"}},
+    {PcOption::Horn,{"Horn","Klaxon","Hupe","Clacson","Claxon","Tuta"}},
+    {PcOption::Nitro,{"Nitro","Nitro","Nitro","Nitro","Nitro","Nitro"}},
+    {PcOption::Reset,{"Reset car","Replacer la voiture","Wagen zuruecksetzen","Riposiziona auto","Recolocar coche","Aterstall bilen"}},
+    {PcOption::HudToggle,{"Toggle HUD","Afficher l'interface","Instrumente umschalten","Mostra indicatori","Mostrar indicadores","Visa instrument"}}
+};
+
+constexpr PcOptionLabel OptionHints[]{
+    {PcOption::Audio,{"Adjust the sound and the jukebox.","Regler le son et le jukebox.","Ton und Jukebox einstellen.",
+        "Regola audio e jukebox.","Ajusta el sonido y el jukebox.","Justera ljud och jukebox."}},
+    {PcOption::Graphics,{"Adjust the display and picture quality.","Regler l'affichage et la qualite d'image.","Anzeige und Bildqualitaet einstellen.",
+        "Regola schermo e qualita video.","Ajusta la pantalla y la calidad de imagen.","Justera skarm och bildkvalitet."}},
+    {PcOption::AdaptiveTriggers,{"Add resistance to the triggers used for gas and brake.",
+        "Ajoute une resistance aux gachettes d'acceleration et de frein.",
+        "Trigger-Widerstand beim Gasgeben und Bremsen.",
+        "Aggiunge resistenza ai grilletti di acceleratore e freno.",
+        "Anade resistencia a los gatillos de acelerador y freno.",
+        "Ger motstand i avtryckarna for gas och broms."}},
+    {PcOption::PoliceRadioSpeaker,{"Play police radio on the DualSense speaker over USB.",
+        "Joue la radio de police sur la DualSense par USB.",
+        "Polizeifunk ueber den DualSense-Lautsprecher per USB.",
+        "Riproduce la radio della polizia sulla DualSense via USB.",
+        "Reproduce la radio policial en el DualSense por USB.",
+        "Spelar polisradion i DualSense via USB."}},
+    {PcOption::PoliceRadioVolume,{"Adjust the DualSense speaker volume.",
+        "Regle le volume du haut-parleur de la DualSense.",
+        "Lautstaerke des DualSense-Lautsprechers einstellen.",
+        "Regola il volume dell'altoparlante del DualSense.",
+        "Ajusta el volumen del altavoz del DualSense.",
+        "Staller in volymen pa DualSense-hogtalaren."}},
+    {PcOption::Controls,{"Configure the keyboard and gamepad.","Configurer le clavier et la manette.","Tastatur und Gamepad einstellen.",
+        "Configura tastiera e gamepad.","Configura el teclado y el mando.","Stall in tangentbord och handkontroll."}},
+    {PcOption::Hud,{"Choose what to show during races.","Choisir quoi afficher en course.","Rennanzeigen auswaehlen.",
+        "Scegli cosa mostrare in gara.","Elige que mostrar durante la carrera.","Valj vad som visas under lopp."}},
+    {PcOption::Profiles,{"Choose, create or delete a profile.","Choisir, creer ou supprimer un profil.","Ein Profil waehlen, erstellen oder loeschen.",
+        "Scegli, crea o elimina un profilo.","Elige, crea o elimina un perfil.","Valj, skapa eller radera en profil."}},
+    {PcOption::Name,{"Set the names shown for both players.","Regler les noms des deux joueurs.","Die Namen beider Spieler einstellen.",
+        "Imposta i nomi dei due giocatori.","Cambia los nombres de ambos jugadores.","Ange namnen pa bada spelarna."}},
+    {PcOption::Languages,{"Choose the language of the game.","Choisir la langue du jeu.","Die Sprache des Spiels waehlen.",
+        "Scegli la lingua del gioco.","Elige el idioma del juego.","Valj spelets sprak."}},
+    {PcOption::Credits,{"See who made the game.","Voir qui a cree le jeu.","Das Entwicklerteam ansehen.",
+        "Scopri chi ha creato il gioco.","Descubre quien hizo el juego.","Se vilka som skapade spelet."}},
+    {PcOption::ResolutionPage,{"Window mode, resolution and render scale.","Mode d'affichage, resolution et echelle.","Fenstermodus, Aufloesung und Renderskalierung.",
+        "Finestra, risoluzione e scala di rendering.","Ventana, resolucion y escala de render.","Fonsterlage, upplosning och renderingsskala."}},
+    {PcOption::Window,{"Switch between a window and fullscreen.","Passer de la fenetre au plein ecran.","Zwischen Fenster und Vollbild wechseln.",
+        "Passa da finestra a schermo intero.","Cambia entre ventana y pantalla completa.","Vaxla mellan fonster och helskarm."}},
+    {PcOption::Resolution,{"Set the display size in pixels.","Regler la taille d'affichage en pixels.","Bildgroesse in Pixeln einstellen.",
+        "Imposta la dimensione in pixel.","Ajusta el tamano de pantalla en pixeles.","Stall in bildstorleken i pixlar."}},
+    {PcOption::FrameLimit,{"Set the maximum FPS or choose Unlimited.","Limiter les IPS ou choisir Illimite.","Maximale FPS einstellen oder Unbegrenzt waehlen.",
+        "Limita gli FPS o scegli Illimitato.","Limita los FPS o elige Sin limite.","Begransa FPS eller valj Obegransat."}},
+    {PcOption::Vsync,{"Sync frames to the display to prevent tearing.","Synchroniser les images pour eviter les dechirures.","Bilder synchronisieren, um Tearing zu vermeiden.",
+        "Sincronizza i fotogrammi per evitare il tearing.","Sincroniza la imagen para evitar cortes.","Synka bildrutorna for att undvika delad bild."}},
+    {PcOption::Distance,{"Set how far away scenery stays visible.","Regler la distance de visibilite du decor.","Sichtweite der Streckenumgebung einstellen.",
+        "Regola la distanza visibile dello scenario.","Ajusta hasta donde se ve el escenario.","Stall in hur langt bort omgivningen syns."}},
+    {PcOption::Detail,{"Set the model detail of cars and scenery.","Regler le detail des voitures et du decor.","Detailgrad von Autos und Umgebung einstellen.",
+        "Regola i dettagli di auto e scenario.","Ajusta el detalle de coches y escenario.","Stall in detaljnivan for bilar och omgivning."}},
+    {PcOption::Reflections,{"Set the quality of reflections on cars.","Regler la qualite des reflets des voitures.","Qualitaet der Autoreflexionen einstellen.",
+        "Regola la qualita dei riflessi delle auto.","Ajusta la calidad de los reflejos de los coches.","Stall in kvaliteten pa bilarnas reflektioner."}},
+    {PcOption::Fps,{"Show the frame rate in the corner.","Afficher les IPS dans un coin de l'ecran.","Bildrate in der Ecke anzeigen.",
+        "Mostra gli FPS nell'angolo dello schermo.","Muestra los FPS en la esquina.","Visa bildfrekvensen i hornet."}},
+    {PcOption::Advanced,{"Adjust edges, texture filtering and colors.","Regler le lissage, le filtrage et les couleurs.","Kantenglaettung, Filter und Farben einstellen.",
+        "Regola bordi, filtraggio e colori.","Ajusta bordes, filtrado y colores.","Justera kanter, filtrering och farger."}},
+    {PcOption::Aspect,{"Set the shape of the race picture.","Regler le format d'image en course.","Seitenverhaeltnis im Rennen einstellen.",
+        "Regola le proporzioni dell'immagine in gara.","Ajusta la relacion de aspecto en carrera.","Stall in bildformatet under lopp."}},
+    {PcOption::RenderScale,{"Set the internal resolution before scaling.","Regler la resolution interne avant mise a l'echelle.","Interne Aufloesung vor der Skalierung einstellen.",
+        "Regola la risoluzione interna prima della scala.","Ajusta la resolucion interna antes de escalar.","Stall in upplosningen fore skalning."}},
+    {PcOption::Scaling,{"Choose smooth or sharp image scaling.","Choisir une mise a l'echelle douce ou nette.","Weiche oder scharfe Bildskalierung waehlen.",
+        "Scegli una scala morbida o nitida.","Elige un escalado suave o nitido.","Valj mjuk eller skarp bildskalning."}},
+    {PcOption::AntialiasPage,{"Adjust smoothing on jagged edges.","Regler le lissage des bords.","Treppenkanten glaetten.",
+        "Regola il filtro sui bordi seghettati.","Ajusta el suavizado de los bordes dentados.","Stall in utjamning av taggiga kanter."}},
+    {PcOption::Antialiasing,{"Choose the method for smoothing edges.","Choisir la methode de lissage des bords.","Methode zur Kantenglaettung waehlen.",
+        "Scegli il metodo per levigare i bordi.","Elige el metodo para suavizar bordes.","Valj metod for kantutjamning."}},
+    {PcOption::Quality,{"Set the strength of edge smoothing.","Regler le niveau de lissage des bords.","Staerke der Kantenglaettung einstellen.",
+        "Regola il livello di antialiasing.","Ajusta el nivel de suavizado de bordes.","Stall in nivan for kantutjamning."}},
+    {PcOption::Anisotropy,{"Keep angled textures sharp in the distance.","Garder les textures obliques nettes au loin.","Schraege Texturen in der Ferne schaerfer halten.",
+        "Mantieni nitide le texture oblique in lontananza.","Conserva la nitidez de las texturas en angulo.","Hall vinklade texturer skarpa pa avstand."}},
+    {PcOption::Brightness,{"Make the whole picture lighter or darker.","Eclaircir ou assombrir toute l'image.","Das ganze Bild heller oder dunkler machen.",
+        "Schiarisci o scurisci tutta l'immagine.","Aclara u oscurece toda la imagen.","Gor hela bilden ljusare eller morkare."}},
+    {PcOption::Contrast,{"Set the difference between light and dark.","Regler l'ecart entre le clair et le sombre.","Unterschied zwischen Hell und Dunkel einstellen.",
+        "Regola la differenza tra chiaro e scuro.","Ajusta la diferencia entre luces y sombras.","Stall in skillnaden mellan ljust och morkt."}},
+    {PcOption::Gamma,{"Above 1.00, dark areas become lighter.","Au-dessus de 1.00, les zones sombres s'eclaircissent.","Ueber 1.00 werden dunkle Bereiche heller.",
+        "Sopra 1.00, le zone scure si schiariscono.","Por encima de 1.00 se aclaran las zonas oscuras.","Over 1.00 blir morka delar ljusare."}},
+    {PcOption::PictureDefaults,{"Restore brightness, contrast and gamma.","Reinitialiser luminosite, contraste et gamma.","Helligkeit, Kontrast und Gamma zuruecksetzen.",
+        "Ripristina luminosita, contrasto e gamma.","Restaura brillo, contraste y gamma.","Aterstall ljusstyrka, kontrast och gamma."}},
+    {PcOption::Deadzone,{"Set how far the stick moves before steering.","Regler la course du stick avant de tourner.","Stickweg bis zur ersten Lenkreaktion einstellen.",
+        "Regola la corsa dello stick prima di sterzare.","Ajusta cuanto se mueve la palanca antes de girar.","Stall in hur langt spaken rors fore styrning."}},
+    {PcOption::Steering,{"Set how strongly the car responds to the stick.","Regler la reponse de la voiture au stick.","Lenkempfindlichkeit des Gamepads einstellen.",
+        "Regola quanto risponde l'auto allo stick.","Ajusta la sensibilidad de la direccion.","Stall in hur snabbt bilen svarar pa spaken."}},
+    {PcOption::IconStyle,{"Choose which controller button icons to show.","Choisir les icones de boutons de la manette.","Tastensymbole fuer das Gamepad auswaehlen.",
+        "Scegli le icone dei tasti del gamepad.","Elige los iconos de los botones del mando.","Valj vilka knappikoner som visas."}},
+    {PcOption::InputMode,{"Choose which device supplies input.","Choisir le peripherique de commande.","Eingabegeraet auswaehlen.",
+        "Scegli il dispositivo di controllo.","Elige el dispositivo de entrada.","Valj vilken enhet som anvands."}},
+    {PcOption::Keyboard,{"Change the keys used while driving.","Changer les touches utilisees en course.","Tasten fuer die Fahrt aendern.",
+        "Cambia i tasti usati in gara.","Cambia las teclas usadas al conducir.","Andra tangenterna som anvands under lopp."}},
+    {PcOption::Gamepad,{"Set up gamepad buttons and stick response.","Regler les boutons et la reponse du stick.","Gamepadtasten und Stickreaktion einstellen.",
+        "Regola pulsanti e risposta dello stick.","Configura los botones y la respuesta de la palanca.","Stall in knappar och spakrespons."}},
+    {PcOption::Player,{"Set up the second player for split screen.","Configurer le second joueur en ecran partage.","Spieler 2 fuer den geteilten Bildschirm einstellen.",
+        "Configura il secondo giocatore a schermo condiviso.","Configura al segundo jugador para pantalla dividida.","Stall in spelare 2 for delad skarm."}},
+    {PcOption::Player2Pad,{"Assign a connected gamepad to player 2.","Attribuer une manette connectee au joueur 2.","Spieler 2 ein angeschlossenes Gamepad zuweisen.",
+        "Assegna un gamepad collegato al giocatore 2.","Asigna un mando conectado al jugador 2.","Tilldela spelare 2 en ansluten handkontroll."}},
+    {PcOption::Layouts,{"Layouts E-H put gas and brake on the triggers.",
+        "Les dispositions E-H utilisent les gachettes pour accelerer et freiner.",
+        "In Layout E-H liegen Gas und Bremse auf den Triggern.",
+        "Nelle configurazioni E-H si accelera e si frena con i grilletti.",
+        "Los esquemas E-H usan los gatillos para acelerar y frenar.",
+        "Layout E-H anvander avtryckarna for gas och broms."}},
+    {PcOption::PadDefaults,{"Restore the default gamepad settings.","Retablir les reglages de manette par defaut.","Standardwerte fuer das Gamepad wiederherstellen.",
+        "Ripristina le impostazioni del gamepad.","Restaura los ajustes originales del mando.","Aterstall handkontrollens standardinstallningar."}},
+    {PcOption::KeyboardDefaults,{"Restore the default keys for this player.","Retablir les touches par defaut de ce joueur.","Standardtasten dieses Spielers wiederherstellen.",
+        "Ripristina i tasti predefiniti del giocatore.","Restaura las teclas de este jugador.","Aterstall spelarens standardtangenter."}},
+    {PcOption::Accelerate,{"Bind the key that applies the throttle.","Attribuer la touche d'acceleration.","Taste fuer das Gaspedal zuweisen.",
+        "Assegna il tasto dell'acceleratore.","Asigna la tecla del acelerador.","Tilldela tangenten for gas."}},
+    {PcOption::Brake,{"Bind the key that slows the car.","Attribuer la touche de freinage.","Taste zum Bremsen zuweisen.",
+        "Assegna il tasto del freno.","Asigna la tecla del freno.","Tilldela tangenten for bromsen."}},
+    {PcOption::SteerLeft,{"Bind the key that steers the car left.","Attribuer la touche pour braquer a gauche.","Taste zum Linkslenken zuweisen.",
+        "Assegna il tasto per sterzare a sinistra.","Asigna la tecla para girar a la izquierda.","Tilldela tangenten for vansterstyrning."}},
+    {PcOption::SteerRight,{"Bind the key that steers the car right.","Attribuer la touche pour braquer a droite.","Taste zum Rechtslenken zuweisen.",
+        "Assegna il tasto per sterzare a destra.","Asigna la tecla para girar a la derecha.","Tilldela tangenten for hoger styrning."}},
+    {PcOption::Handbrake,{"Bind the key that locks the rear wheels.","Attribuer la touche qui bloque les roues arriere.","Taste zum Blockieren der Hinterraeder zuweisen.",
+        "Assegna il tasto che blocca le ruote posteriori.","Asigna la tecla que bloquea las ruedas traseras.","Tilldela tangenten som laser bakhjulen."}},
+    {PcOption::Nitro,{"Bind the boost key for cars with nitro.","Attribuer la touche de boost des voitures a nitro.","Taste fuer den Nitro-Schub zuweisen.",
+        "Assegna il tasto del turbo a nitro.","Asigna la tecla de impulso de los coches con nitro.","Tilldela tangenten for nitroboost."}},
+    {PcOption::LookBack,{"Bind the key that looks behind the car.","Attribuer la touche pour regarder derriere l'auto.","Taste fuer den Blick nach hinten zuweisen.",
+        "Assegna il tasto per guardare dietro l'auto.","Asigna la tecla para mirar detras del coche.","Tilldela tangenten for att se bakom bilen."}},
+    {PcOption::Camera,{"Bind the key that cycles driving views.","Attribuer la touche qui change la vue de conduite.","Taste zum Wechseln der Fahransicht zuweisen.",
+        "Assegna il tasto per cambiare inquadratura.","Asigna la tecla para cambiar la vista de conduccion.","Tilldela tangenten som byter kameravy."}},
+    {PcOption::Horn,{"Bind the key that sounds the car horn.","Attribuer la touche du klaxon.","Taste fuer die Hupe zuweisen.",
+        "Assegna il tasto del clacson.","Asigna la tecla del claxon.","Tilldela tangenten for tutan."}},
+    {PcOption::ShiftDown,{"Bind the key for a lower manual gear.","Attribuer la touche pour retrograder en mode manuel.","Taste zum manuellen Herunterschalten zuweisen.",
+        "Assegna il tasto per scalare marcia.","Asigna la tecla para reducir la marcha manual.","Tilldela tangenten for manuell nedvaxling."}},
+    {PcOption::ShiftUp,{"Bind the key for a higher manual gear.","Attribuer la touche pour monter un rapport en manuel.","Taste zum manuellen Hochschalten zuweisen.",
+        "Assegna il tasto per salire di marcia.","Asigna la tecla para subir la marcha manual.","Tilldela tangenten for manuell uppvaxling."}},
+    {PcOption::HudToggle,{"Bind the key that changes the race HUD view.","Attribuer la touche qui change l'affichage en course.","Taste zum Wechseln der Rennanzeige zuweisen.",
+        "Assegna il tasto per cambiare l'HUD di gara.","Asigna la tecla para cambiar el HUD de carrera.","Tilldela tangenten som byter loppets HUD."}},
+    {PcOption::Reset,{"Bind the key that puts the car back on the road.","Attribuer la touche qui remet la voiture sur la route.","Taste zum Zuruecksetzen auf die Strasse zuweisen.",
+        "Assegna il tasto per rimettere l'auto in pista.","Asigna la tecla para devolver el coche a la pista.","Tilldela tangenten som staller bilen tillbaka pa vagen."}},
+    {PcOption::ZoneFreeze,{"Bind the key for the freeze-frame camera.","Attribuer la touche de la camera avec arret sur image.","Taste fuer die Standbildkamera zuweisen.",
+        "Assegna il tasto della telecamera a fermo immagine.","Asigna la tecla de la camara con imagen congelada.","Tilldela tangenten for kamerans frysbild."}},
+    {PcOption::ZoneZoom,{"Bind the key for the Zone zoom camera.","Attribuer la touche du zoom de la camera Zone.","Taste fuer den Zoom der Zonenkamera zuweisen.",
+        "Assegna il tasto dello zoom della telecamera Zone.","Asigna la tecla del zoom de la camara Zone.","Tilldela tangenten for Zone-kamerans zoom."}},
+    {PcOption::Profile,{"Load this profile and its saved progress.","Charger ce profil et sa progression.","Dieses Profil und seinen Fortschritt laden.",
+        "Carica questo profilo e i suoi progressi.","Carga este perfil y su progreso.","Las in profilen och dess sparade framsteg."}},
+    {PcOption::NewProfile,{"Create a profile with separate progress.","Creer un profil avec sa propre progression.","Ein Profil mit eigenem Spielfortschritt erstellen.",
+        "Crea un profilo con progressi separati.","Crea un perfil con progreso independiente.","Skapa en profil med egna sparade framsteg."}},
+    {PcOption::English,{"Switch the game to English.","Passer le jeu en anglais.","Das Spiel auf Englisch umstellen.",
+        "Passa all'inglese.","Cambia el juego a ingles.","Byt spelets sprak till engelska."}},
+    {PcOption::French,{"Switch the game to French.","Passer le jeu en francais.","Das Spiel auf Franzoesisch umstellen.",
+        "Passa al francese.","Cambia el juego a frances.","Byt spelets sprak till franska."}},
+    {PcOption::German,{"Switch the game to German.","Passer le jeu en allemand.","Das Spiel auf Deutsch umstellen.",
+        "Passa al tedesco.","Cambia el juego a aleman.","Byt spelets sprak till tyska."}},
+    {PcOption::Italian,{"Switch the game to Italian.","Passer le jeu en italien.","Das Spiel auf Italienisch umstellen.",
+        "Passa all'italiano.","Cambia el juego a italiano.","Byt spelets sprak till italienska."}},
+    {PcOption::Spanish,{"Switch the game to Spanish.","Passer le jeu en espagnol.","Das Spiel auf Spanisch umstellen.",
+        "Passa allo spagnolo.","Cambia el juego a espanol.","Byt spelets sprak till spanska."}},
+    {PcOption::Swedish,{"Switch the game to Swedish.","Passer le jeu en suedois.","Das Spiel auf Schwedisch umstellen.",
+        "Passa allo svedese.","Cambia el juego a sueco.","Byt spelets sprak till svenska."}},
+};
+enum class PcPage : std::size_t {Graphics,Resolution,Advanced,Antialiasing,Controls,Keyboard,Gamepad,PlayerTwo,KeyboardTwo,Profiles,Languages,Options};
+struct PcPageDescription {
+    const char* name;
+    Translation title;
+    std::initializer_list<PcOption> options;
+};
+using Row=PcOption;
+constexpr std::size_t VisiblePcRows=7;
+const std::array<PcPageDescription,12> PcPages{{
+    {"PC Graphics",{"Graphics","Graphismes","Grafik","Grafica","Graficos","Grafik"},
+        {Row::ResolutionPage,Row::FrameLimit,Row::Vsync,Row::Distance,Row::Detail,Row::Reflections,Row::Fps,Row::Advanced}},
+    {"PC Resolution",{"Resolution","Resolution","Aufloesung","Risoluzione","Resolucion","Upplosning"},
+        {Row::Window,Row::Resolution,Row::Aspect,Row::RenderScale,Row::Scaling}},
+    {"PC Advanced",{"Advanced","Avance","Erweitert","Avanzate","Avanzado","Avancerat"},
+        {Row::AntialiasPage,Row::Anisotropy,Row::Brightness,Row::Contrast,Row::Gamma,Row::PictureDefaults}},
+    {"PC Antialiasing",{"Antialiasing","Anticrenelage","Kantenglaettung","Antialiasing","Suavizado","Kantutjamning"},
+        {Row::Antialiasing,Row::Quality}},
+    {"PC Controls",{"Controls","Commandes","Steuerung","Comandi","Controles","Kontroller"},
+        {Row::Keyboard,Row::Gamepad,Row::Player,Row::InputMode}},
+    {"PC Keyboard",{"Keyboard","Clavier","Tastatur","Tastiera","Teclado","Tangentbord"},
+        {Row::Accelerate,Row::Brake,Row::SteerLeft,Row::SteerRight,Row::Handbrake,Row::Nitro,Row::LookBack,
+         Row::Camera,Row::Horn,Row::ShiftDown,Row::ShiftUp,Row::HudToggle,Row::Reset,Row::ZoneFreeze,Row::ZoneZoom,Row::KeyboardDefaults}},
+    {"PC Gamepad",{"Gamepad","Manette","Gamepad","Gamepad","Mando","Handkontroll"},
+        {Row::Layouts,Row::Deadzone,Row::Steering,Row::IconStyle,Row::PadDefaults,Row::AdaptiveTriggers,Row::PoliceRadioSpeaker,Row::PoliceRadioVolume}},
+    {"PC Player 2",{"Player 2","Joueur 2","Spieler 2","Giocatore 2","Jugador 2","Spelare 2"},
+        {Row::InputMode,Row::Keyboard,Row::Player2Pad,Row::AdaptiveTriggers,Row::PoliceRadioSpeaker,Row::PoliceRadioVolume}},
+    {"PC Keyboard P2",{"Player 2 Keyboard","Clavier joueur 2","Tastatur Spieler 2","Tastiera giocatore 2","Teclado jugador 2","Spelare 2 tangentbord"},
+        {Row::Accelerate,Row::Brake,Row::SteerLeft,Row::SteerRight,Row::Handbrake,Row::Nitro,Row::LookBack,
+         Row::Camera,Row::Horn,Row::ShiftDown,Row::ShiftUp,Row::HudToggle,Row::Reset,Row::ZoneFreeze,Row::ZoneZoom,Row::KeyboardDefaults}},
+    {"PC Profiles",{"Profiles","Profils","Profile","Profili","Perfiles","Profiler"},
+        {Row::Profile,Row::Profile,Row::Profile,Row::Profile,Row::Profile,Row::Profile,Row::NewProfile}},
+    {"PC Languages",{"Languages","Langues","Sprachen","Lingue","Idiomas","Sprak"},
+        {Row::English,Row::French,Row::German,Row::Italian,Row::Spanish,Row::Swedish}},
+    {"Options",{"Options","Options","Optionen","Opzioni","Opciones","Alternativ"},
+        {Row::Audio,Row::Controls,Row::Graphics,Row::Hud,Row::Profiles,Row::Name,Row::Languages,Row::Credits}}
+}};
+
+const PcPageDescription& Describe(PcPage page) {return PcPages[static_cast<std::size_t>(page)];}
+constexpr float PcDrawDistance[]{1.0f,1.5f,2.0f,3.0f,4.0f};
+constexpr int PcAnisotropy[]{0,2,4,8,16};
+int SliderSteps(Row option)
+{
+    switch(option) {
+    case Row::Distance:return static_cast<int>(std::size(PcDrawDistance))-1;
+    case Row::Brightness:case Row::Contrast:return 20;
+    case Row::Gamma:return 30;
+    case Row::Deadzone:return 25;
+    case Row::Steering:return 15;
+    case Row::PoliceRadioVolume:return 100;
+    default:return 0;
+    }
+}
+std::size_t MenuLanguage(const MainMenuScreenServices& services)
+{
+    return static_cast<std::size_t>(std::clamp(services.ui->language->currentLanguage,0,5));
+}
+
+void OpenPcPage(MainMenuScreenServices& services,PcPage page)
+{
+    services.screens->ChangeToScreen(Describe(page).name,true);
+}
+
+void ClonePcPages(MainMenuScreenServices& services)
+{
+    for(std::size_t i=0;i<PcPages.size();++i) {
+        const auto& page=PcPages[i];
+        const auto key=i==static_cast<std::size_t>(PcPage::Options)?0x95ad096bu:hashString(page.name);
+        const auto rows=std::min(page.options.size(),VisiblePcRows);
+        services.ui->resources->CloneOptionsPage(key,rows);
+        if(std::any_of(page.options.begin(),page.options.end(),[](Row row){return SliderSteps(row)>0;}))
+            services.ui->resources->AddNativeOptionSliders(key,rows);
+    }
+    services.ui->resources->AddNativeAudioMaster(0xe116761cu);
+    auto& resources=*services.ui->resources;
+    resources.AddNativeBackHints();
+    const auto profileKey=hashString(Describe(PcPage::Profiles).name);
+    for(const auto& hint: {std::pair{"PC_BACK_ICON","PC_DEL_ICON"},std::pair{"PC_BACK_TEXT","PC_DEL_TEXT"}}) {
+        if(const auto* source=static_cast<const FlailerTextChunk*>(resources.FindObject(profileKey,hashString(hint.first),1))) {
+            auto& copy=resources.CloneNativeText(profileKey,*source,hashString(hint.second));
+            copy.SetTopLeftX(source->topLeftX+96.0f);copy.visible=0;
+        }
+    }
+}
+
+
+int BindingIndex(PcOption option)
+{
+    switch(option) {
+    case Row::Accelerate:return 14;
+    case Row::Brake:return 15;
+    case Row::SteerLeft:return 16;
+    case Row::SteerRight:return 17;
+    case Row::Handbrake:return 11;
+    case Row::Camera:return 12;
+    case Row::ShiftUp:return 9;
+    case Row::ShiftDown:return 8;
+    case Row::LookBack:return 10;
+    case Row::Horn:return 13;
+    case Row::Nitro:return 2;
+    case Row::Reset:return 0;
+    case Row::HudToggle:return 4;
+    case Row::ZoneFreeze:return 20;
+    case Row::ZoneZoom:return 21;
+    default:return -1;
+    }
+}
+
+template<typename T,std::size_t n>
+T Cycle(T value,const T (&choices)[n],int direction)
+{
+    auto found=std::find(std::begin(choices),std::end(choices),value);
+    const auto index=found==std::end(choices)?(direction>0?0:n-1):
+        static_cast<std::size_t>((found-std::begin(choices)+static_cast<std::ptrdiff_t>(n)+direction)%n);
+    return choices[index];
+}
+
+std::pair<int,int> CycleDisplayChoice(std::pair<int,int> value,const std::vector<std::pair<int,int>>& choices,int direction)
+{
+    if(choices.empty())return value;
+    const auto found=std::find(choices.begin(),choices.end(),value);
+    const auto count=static_cast<std::ptrdiff_t>(choices.size());
+    const auto index=found==choices.end()?(direction>0?0:count-1):(found-choices.begin()+count+direction)%count;
+    return choices[static_cast<std::size_t>(index)];
+}
+class NativeOptionsScreen final:public OptionsScreenBase {
+public:
+    NativeOptionsScreen(MainMenuScreenServices& services,std::uint32_t screen,PcPage page)
+        :OptionsScreenBase(services,screen),page_(page),description_(Describe(page)),host_(*services.pcHost),
+         blurb_(*services.ui,screen,0x75980cf0u,0x75980cf0u,0x70a404ecu),
+         arrows_(*services.ui,screen,0xd1cda594u,0x9345e4a7u)
+    {
+        auto& resources=*services.ui->resources;
+        resources.SetLocalizedText(screen,hashString("PC_OPTIONS_TITLE"),description_.title[MenuLanguage(services)]);
+        for(std::size_t row=0;row<std::min(description_.options.size(),VisiblePcRows);++row) {
+            if(const auto* object=static_cast<const FlailerTextChunk*>(resources.FindObject(screen,ValueKey(row),1)))
+                valueScale_[row]=object->nativeFitBaseX?object->nativeFitBaseX:object->scaleX;
+            if(const auto* object=static_cast<const FlailerTextChunk*>(
+                resources.FindObject(screen,0x52e039f3u+static_cast<std::uint32_t>(row),1)))
+                labelScale_[row]=object->nativeFitBaseX?object->nativeFitBaseX:object->scaleX;
+            if(resources.FindObject(screen,SliderBarKey(row),2)) {
+                sliders_[row].emplace(*services.ui,screen,0x52e039f3u+static_cast<std::uint32_t>(row),
+                    SliderBarKey(row),SliderThumbKey(row),0.0f);
+            }
+        }
+        if(page_==PcPage::Profiles)RefreshProfiles();
+        else Redraw();
+        for(auto& slider:sliders_)if(slider)slider->ShowValue(slider->position.desiredValue,true);
+    }
+    ~NativeOptionsScreen() override
+    {
+        EndRenderPreview();
+        if(capture_>=0)host_.BeginBindingCapture(-1);
+    }
+    static void Callback(ScreenMessage message,ScreenCallbackData* data)
+    {
+        if(message==ScreenMessage::ScreenActivate) {
+            Require(data,"PC page activation requires screen identity");
+            auto& services=BoundServices();
+            const auto page=std::find_if(PcPages.begin(),PcPages.end(),[&](const auto& item) {
+                return hashString(item.name)==data->key;
+            });
+            Require(page!=PcPages.end() && services.pcHost,"Unregistered PC options page");
+            Install(std::make_unique<NativeOptionsScreen>(services,data->key,static_cast<PcPage>(page-PcPages.begin())));
+        } else BaseCallback(message,data);
+    }
+private:
+    static std::uint32_t ValueKey(std::size_t row) {return hashString("PC_OPTION_VALUE")+static_cast<std::uint32_t>(row);}
+    static std::uint32_t SliderBarKey(std::size_t row) {return hashString("PC_OPTION_SLIDER_BAR")+static_cast<std::uint32_t>(row);}
+    static std::uint32_t SliderThumbKey(std::size_t row) {return hashString("PC_OPTION_SLIDER_THUMB")+static_cast<std::uint32_t>(row);}
+    std::size_t Language() const {return MenuLanguage(state_->services);}
+    bool OptionVisible(Row option) const
+    {
+        return hasDualSense_ || (option!=Row::AdaptiveTriggers && option!=Row::PoliceRadioSpeaker &&
+            option!=Row::PoliceRadioVolume);
+    }
+    std::size_t OptionCount() const
+    {
+        if(page_==PcPage::Profiles)return profileNames_.size()+1;
+        return static_cast<std::size_t>(std::count_if(description_.options.begin(),description_.options.end(),
+            [&](Row option){return OptionVisible(option);}));
+    }
+    std::size_t RowCount() const {return std::min(OptionCount(),VisiblePcRows);}
+    std::int32_t Port() const {return page_==PcPage::KeyboardTwo || page_==PcPage::PlayerTwo?1:0;}
+    PcOption OptionAt(std::size_t row) const
+    {
+        if(page_!=PcPage::Profiles) {
+            for(const auto option:description_.options)if(OptionVisible(option) && row--==0)return option;
+            throw std::out_of_range("Native options row");
+        }
+        return row<profileNames_.size()?Row::Profile:Row::NewProfile;
+    }
+    int SliderIndex(Row option,const NativePcSettings& settings) const
+    {
+        int index{};
+        switch(option) {
+        case Row::Distance:
+            index=static_cast<int>(std::min_element(std::begin(PcDrawDistance),std::end(PcDrawDistance),
+                [&](float a,float b){return std::abs(a-settings.render.drawDistanceScale)<
+                    std::abs(b-settings.render.drawDistanceScale);})-std::begin(PcDrawDistance));break;
+        case Row::Brightness:index=(settings.render.brightness+52)/5;break;
+        case Row::Contrast:index=(settings.render.contrast-48)/5;break;
+        case Row::Gamma:index=(settings.render.gamma-48)/5;break;
+        case Row::Deadzone: {
+            const auto zone=settings.input.profiles[Port()].deadzone[2];
+            index=((zone>=0?zone:settings.input.leftDeadzone)*50+16383)/32767;break;
+        }
+        case Row::Steering:index=(settings.input.steeringSensitivity-45)/10;break;
+        case Row::PoliceRadioVolume:index=settings.input.profiles[Port()].policeRadioVolume;break;
+        default:break;
+        }
+        return std::clamp(index,0,SliderSteps(option));
+    }
+    bool SetSliderIndex(Row option,int index,NativePcSettings& settings) const
+    {
+        const auto assign=[](auto& setting,auto value) {
+            if(setting==value)return false;
+            setting=value;
+            return true;
+        };
+        switch(option) {
+        case Row::Distance:return assign(settings.render.drawDistanceScale,PcDrawDistance[index]);
+        case Row::Brightness:return assign(settings.render.brightness,-50+index*5);
+        case Row::Contrast:return assign(settings.render.contrast,50+index*5);
+        case Row::Gamma:return assign(settings.render.gamma,50+index*5);
+        case Row::Deadzone:return assign(settings.input.profiles[Port()].deadzone[2],(index*2*32767+50)/100);
+        case Row::Steering:return assign(settings.input.steeringSensitivity,50+index*10);
+        case Row::PoliceRadioVolume:return assign(settings.input.profiles[Port()].policeRadioVolume,index);
+        default:return false;
+        }
+    }
+    void EndRenderPreview() noexcept
+    {
+        if(std::exchange(renderPreview_,false))configureNativeRenderSettings(host_.PcSettings()->render);
+        if(std::exchange(radioPreview_,false))host_.PreviewDualSenseVolume(Port(),std::nullopt);
+    }
+    void AdjustSlider(std::size_t row,Row option,ScreenMessage message,ScreenCallbackData& data)
+    {
+        const bool drag=message==ScreenMessage::SliderDrag;
+        const bool pointer=drag || message==ScreenMessage::SliderCommit;
+        auto settings=*host_.PcSettings();
+        const int steps=SliderSteps(option),current=SliderIndex(option,settings);
+        const int index=pointer ? (std::clamp(data.value,0,10000)*steps+5000)/10000 :
+            std::clamp(current+(message==ScreenMessage::Left?-1:1),0,steps);
+        auto& slider=*sliders_[row];
+        const float fraction=static_cast<float>(index)/steps;
+        const bool changed=slider.position.desiredValue!=fraction;
+        data.sound=0;
+        const bool changedSetting=(pointer || index!=current) && SetSliderIndex(option,index,settings);
+        if(drag) {
+            const bool graphicsSlider=option==Row::Distance || option==Row::Brightness || option==Row::Contrast || option==Row::Gamma;
+            if(graphicsSlider && (!renderPreview_ || changed)) {
+                configureNativeRenderSettings(settings.render);
+                renderPreview_=true;
+            }
+            if(option==Row::PoliceRadioVolume) {
+                host_.PreviewDualSenseVolume(Port(),index);
+                radioPreview_=true;
+            }
+            slider.ShowValue(fraction,true);
+            SetFittedText(ValueKey(row),Value(option,settings),valueScale_[row],96.0f);
+            if(changed)slider.PlayChange();
+            return;
+        }
+        EndRenderPreview();
+        if(!changedSetting) {Redraw();return;}
+        if(Save(settings,false) && changed)slider.PlayChange();
+    }
+    static const char* OptionLabel(PcOption option,std::size_t lang)
+    {
+        for(const auto& label:Labels)if(label.option==option)return label.text[lang];
+        return "";
+    }
+    std::string Value(PcOption option,const NativePcSettings& settings) const
+    {
+        constexpr Translation on{"On","Oui","An","Si","Si","Pa"};
+        constexpr Translation off{"Off","Non","Aus","No","No","Av"};
+        constexpr Translation windowed{"Windowed","Fenetre","Fenster","Finestra","Ventana","Fonster"};
+        constexpr Translation fullscreen{"Fullscreen","Plein ecran","Vollbild","Schermo intero","Pantalla completa","Helskarm"};
+        constexpr Translation uncapped{"Unlimited","Illimite","Unbegrenzt","Illimitato","Sin limite","Obegransat"};
+        const auto lang=Language();
+        const auto binding=BindingIndex(option);
+        if(binding>=20)return platform::NativeKeyName(settings.input.zoneKeys[Port()][binding-20]);
+        if(binding>=0)return platform::NativeKeyName(platform::NativeKeyboardBindings(settings.input,Port())[binding]);
+        if(option>=Row::English && option<=Row::Swedish) {
+            constexpr Translation selected{"Selected","Selectionne","Ausgewaehlt","Selezionato","Seleccionado","Valt"};
+            return static_cast<int>(option)-static_cast<int>(Row::English)==static_cast<int>(lang)?selected[lang]:"";
+        }
+        switch(option) {
+        case Row::Resolution: {
+            if(settings.fullscreen && !settings.fullscreenSize.first) {
+                constexpr Translation desktop{"Desktop","Bureau","Desktop","Desktop","Escritorio","Skrivbord"};
+                return desktop[lang];
+            }
+            const auto size=settings.fullscreen?settings.fullscreenSize:std::make_pair(settings.width,settings.height);
+            return std::to_string(size.first)+" x "+std::to_string(size.second);
+        }
+        case Row::Window:return (settings.fullscreen?fullscreen:windowed)[lang];
+        case Row::Vsync:return (settings.vsync?on:off)[lang];
+        case Row::FrameLimit:return settings.frameLimit?std::to_string(settings.frameLimit)+" FPS":uncapped[lang];
+        case Row::Distance: {
+            char value[24]{};
+            std::snprintf(value,sizeof(value),"%.0f%%",settings.render.drawDistanceScale*100.0f);
+            return value;
+        }
+        case Row::RenderScale: {
+            constexpr Translation native{"Native","Natif","Nativ","Nativo","Nativo","Inbyggd"};
+            return settings.renderScale?std::to_string(settings.renderScale)+"x":native[lang];
+        }
+        case Row::Aspect: {
+            constexpr Translation automatic{"Automatic","Automatique","Automatisch","Automatico","Automatico","Automatisk"};
+            if(!settings.raceAspect.first)return automatic[lang];
+            return std::to_string(settings.raceAspect.first)+":"+std::to_string(settings.raceAspect.second);
+        }
+        case Row::Scaling: {
+            constexpr Translation sharp{"Sharp","Net","Scharf","Nitido","Nitido","Skarp"};
+            constexpr Translation smooth{"Smooth","Lisse","Weich","Morbido","Suave","Mjuk"};
+            return (settings.sharpScaling?sharp:smooth)[lang];
+        }
+        case Row::Detail: {
+            constexpr Translation maximum{"Maximum","Maximum","Maximal","Massimo","Maximo","Maximal"};
+            constexpr Translation original{"Original","Original","Original","Originale","Original","Original"};
+            return (settings.render.maximumDetail?maximum:original)[lang];
+        }
+        case Row::Reflections: {
+            constexpr Translation high{"High","Eleves","Hoch","Alti","Altos","Hoga"};
+            if(settings.render.reflections==2)return high[lang];
+            return settings.render.reflections==1?OptionLabel(Row::Advanced,lang):"PS2";
+        }
+        case Row::Antialiasing:
+            if(settings.antialiasing==NativeAntialiasing::Off)return off[lang];
+            if(settings.antialiasing==NativeAntialiasing::Fxaa)return "FXAA";
+            return settings.antialiasing>=NativeAntialiasing::SmaaHigh?"SMAA":"MSAA";
+        case Row::Quality:
+            if(settings.antialiasing==NativeAntialiasing::SmaaHigh)return "2x";
+            if(settings.antialiasing==NativeAntialiasing::SmaaUltra)return "4x";
+            if(settings.antialiasing<NativeAntialiasing::Msaa2)return "-";
+            return std::to_string(1<<(static_cast<int>(settings.antialiasing)-1))+"x";
+        case Row::Anisotropy:return settings.textureFilter==NativeTextureFilter::Anisotropic?
+            std::to_string(settings.anisotropy)+"x":off[lang];
+        case Row::Brightness:return (settings.render.brightness>0?"+":"")+std::to_string(settings.render.brightness);
+        case Row::Contrast:return std::to_string(settings.render.contrast)+"%";
+        case Row::Gamma: {
+            char text[16]{};
+            std::snprintf(text,sizeof(text),"%d.%02d",settings.render.gamma/100,settings.render.gamma%100);
+            return text;
+        }
+        case Row::Fps:return (settings.showFps?on:off)[lang];
+        case Row::AdaptiveTriggers:return (settings.input.profiles[Port()].adaptiveTriggers?on:off)[lang];
+        case Row::PoliceRadioSpeaker:return (settings.input.profiles[Port()].policeRadioSpeaker?on:off)[lang];
+
+        case Row::Deadzone: {
+            const auto zone=settings.input.profiles[Port()].deadzone[2];
+            return std::to_string(((zone>=0?zone:settings.input.leftDeadzone)*100+16383)/32767)+"%";
+        }
+        case Row::Steering:return std::to_string(settings.input.steeringSensitivity)+"%";
+        case Row::PoliceRadioVolume:return std::to_string(settings.input.profiles[Port()].policeRadioVolume)+"%";
+        case Row::IconStyle: {
+            const char* styles[]{"Auto","Xbox","PlayStation"};
+            return styles[settings.input.promptStyle];
+        }
+        case Row::InputMode: {
+            constexpr Translation modes[]={
+                {"Automatic","Automatique","Automatisch","Automatico","Automatico","Automatiskt"},
+                {"Keyboard","Clavier","Tastatur","Tastiera","Teclado","Tangentbord"},
+                {"Gamepad","Manette","Gamepad","Gamepad","Mando","Handkontroll"},
+                {"Keyboard and gamepad","Clavier et manette","Tastatur und Gamepad","Tastiera e gamepad","Teclado y mando","Tangentbord och handkontroll"},
+                {"Disabled","Desactive","Deaktiviert","Disattivato","Desactivado","Av"}};
+            return modes[static_cast<std::size_t>(settings.input.deviceMode[Port()])][lang];
+        }
+        case Row::Player2Pad: {
+            const auto device=host_.InputDeviceName(1);
+            if(!device.empty())return device;
+            constexpr Translation disconnected{"Not connected","Non connectee","Nicht verbunden","Non collegato","Sin conectar","Inte ansluten"};
+            return disconnected[lang];
+        }
+        default:return {};
+        }
+    }
+    void SetFittedText(std::uint32_t key,const std::string& text,float scale,float width)
+    {
+        auto& resources=*state_->services.ui->resources;
+        auto* object=static_cast<FlailerTextChunk*>(resources.FindObject(state_->screen,key,1));
+        if(!object)return;
+        resources.SetLocalizedText(state_->screen,key,text.c_str());
+        if(!object->nativeFitBaseX) {
+            object->nativeFitBaseX=scale;
+            object->nativeFitBaseY=object->scaleY;
+        }
+        object->SetScaleX(scale);
+        const auto measured=resources.ScaledTextWidth(*object,state_->services.ui->language);
+        const auto fit=measured>width?width/measured:1.0f;
+        object->SetScaleX(scale*fit);
+        object->SetScaleY(object->nativeFitBaseY*fit);
+    }
+    void Redraw()
+    {
+        EndRenderPreview();
+        hasDualSense_=host_.HasDualSense(Port());
+        offset_=std::min(offset_,OptionCount()-RowCount());
+        const auto* settings=host_.PcSettings();
+        auto& services=state_->services;
+        if(services.screens->sliderDragScreen==services.screens->active) {
+            services.screens->sliderDragScreen=nullptr;services.screens->sliderDragBar=0;
+        }
+        auto& resources=*services.ui->resources;
+        constexpr Translation back{"Back","Retour","Zurueck","Indietro","Atras","Tillbaka"};
+        resources.SetLocalizedText(state_->screen,hashString("PC_OPTIONS_TITLE"),description_.title[Language()]);
+        constexpr Translation exit{"Exit","Quitter","Beenden","Esci","Salir","Avsluta"};
+        const bool choosing=page_==PcPage::Profiles && services.profiles->ChoosingAtStartup();
+        resources.SetLocalizedText(state_->screen,hashString("PC_BACK_TEXT"),(choosing?exit:back)[Language()]);
+        resources.SetObjectVisibility(state_->screen,0xedf2e4eeu,offset_>0);
+        resources.SetObjectVisibility(state_->screen,0x20d73d01u,offset_+RowCount()<OptionCount());
+        if(page_==PcPage::Gamepad || page_==PcPage::PlayerTwo)UpdateGamepadRows();
+        for(std::size_t row=0;row<RowCount();++row) {
+            const auto option=OptionAt(offset_+row);
+            auto value=Value(option,*settings);
+            if(static_cast<int>(offset_+row)==capture_)value="...";
+            auto label=std::string(OptionLabel(option,Language()));
+            if(option==Row::Profile) {
+                constexpr Translation current{"Current","Actuel","Aktiv","Attivo","Actual","Aktiv"};
+                const auto& profile=profileNames_[offset_+row];
+                label=services.profiles->ProfileName(profile);
+                if(profile==services.profiles->ActiveProfile())value=current[Language()];
+            }
+            const auto key=0x52e039f3u+static_cast<std::uint32_t>(row);
+            const auto steps=SliderSteps(option);
+            if(sliders_[row]) {
+                resources.SetObjectVisibility(state_->screen,SliderBarKey(row),steps!=0);
+                resources.SetObjectVisibility(state_->screen,SliderThumbKey(row),steps!=0);
+                if(steps)sliders_[row]->ShowValue(static_cast<float>(SliderIndex(option,*settings))/steps);
+            }
+            if(auto* valueObject=resources.FindObject(state_->screen,ValueKey(row),1))
+                if(const auto* labelObject=resources.FindObject(state_->screen,key,1))
+                    valueObject->SetTopLeftY(labelObject->topLeftY+(steps?-4.0f:6.0f));
+            resources.SetObjectVisibility(state_->screen,key,1);
+            SetFittedText(key,label,labelScale_[row],
+                value.empty()?405.0f:233.0f);
+            resources.SetObjectVisibility(state_->screen,ValueKey(row),!value.empty());
+            SetFittedText(ValueKey(row),value,valueScale_[row],steps?96.0f:168.0f);
+        }
+    }
+    void UpdateGamepadRows()
+    {
+        auto& services=state_->services;
+        auto& resources=*services.ui->resources;
+        auto* panel=services.screens->active?services.screens->active->FindFlailerScreen(state_->screen):nullptr;
+        for(std::size_t row=0;row<std::min(description_.options.size(),VisiblePcRows);++row) {
+            const auto key=0x52e039f3u+static_cast<std::uint32_t>(row);
+            const bool visible=row<RowCount();
+            if(panel && panel->menu)if(auto* item=panel->menu->FindItem(key)) {
+                if(visible)item->SetMenuItemState(1);else item->ClearMenuItemState(1);
+            }
+            if(visible)continue;
+            resources.SetObjectVisibility(state_->screen,key,0);
+            resources.SetObjectVisibility(state_->screen,ValueKey(row),0);
+            if(sliders_[row]) {
+                resources.SetObjectVisibility(state_->screen,SliderBarKey(row),0);
+                resources.SetObjectVisibility(state_->screen,SliderThumbKey(row),0);
+            }
+        }
+        if(panel && panel->menu && highlightedRow_>=RowCount()) {
+            highlightedRow_=RowCount()-1;
+            panel->menu->SetActiveMenuItem(0x52e039f3u+static_cast<std::uint32_t>(highlightedRow_));
+        }
+    }
+    void RefreshProfiles()
+    {
+        auto& services=state_->services;
+        profileNames_=services.profiles->Profiles();
+        offset_=std::min(offset_,OptionCount()-RowCount());
+        Redraw();
+        auto* source=services.screens->active->FindFlailerScreen(static_cast<std::int32_t>(state_->screen));
+        if(!source || !source->menu)return;
+        auto& resources=*services.ui->resources;
+        for(std::size_t row=0;row<description_.options.size();++row) {
+            const auto key=0x52e039f3u+static_cast<std::uint32_t>(row);
+            auto* item=source->menu->FindItem(key);
+            if(!item)continue;
+            if(row<RowCount())item->SetMenuItemState(1);
+            else {
+                item->ClearMenuItemState(1);
+                resources.SetObjectVisibility(state_->screen,key,0);
+                resources.SetObjectVisibility(state_->screen,ValueKey(row),0);
+            }
+        }
+    }
+    void AskDelete(const std::string& profile,std::int32_t port)
+    {
+        auto& services=state_->services;
+        if(profile==services.profiles->ActiveProfile())return;
+        constexpr Translation prompt{"Delete this profile?","Supprimer ce profil?","Dieses Profil loeschen?",
+            "Eliminare il profilo?","Eliminar este perfil?","Ta bort profilen?"};
+        FlailerPopupConfig popup;
+        popup.sourceNode=services.screens->active;popup.screenKey=0x037f3133u;
+        popup.flags=3;popup.buttonCount=2;popup.message=prompt[Language()];
+        popup.buttonLanguageIds={{0x38277,0x38278,0}};popup.buttonResults={{1,0,0}};
+        popup.initialButton=1;popup.joystickPort=port;
+        if(services.screens->SummonPopup(popup)>=0)deleteProfile_=profile;
+    }
+    bool Save(const NativePcSettings& settings,bool display)
+    {
+        std::string error;
+        const auto previous=*host_.PcSettings();
+        if(host_.SavePcSettings(settings,error)) {
+            const bool controls=page_==PcPage::Keyboard || page_==PcPage::KeyboardTwo ||
+                page_==PcPage::PlayerTwo || page_==PcPage::Gamepad;
+            if(controls && !state_->services.profiles->SaveProfileControls(settings)) {
+                error=state_->services.profiles->LastError();
+                std::string rollback;
+                if(!host_.SavePcSettings(previous,rollback))error+=". "+rollback;
+                ReportError(error);
+                Redraw();
+                return false;
+            }
+            if(display)state_->services.applyPcDisplay(settings);
+        } else {ReportError(error);Redraw();return false;}
+        Redraw();
+        return true;
+    }
+    void ReportError(const std::string& error)
+    {
+        host_.RecordSessionEvent("menu.settings_failed",error.c_str());
+        constexpr Translation messages{"Settings could not be saved.","Impossible d'enregistrer.",
+            "Speichern fehlgeschlagen.","Salvataggio non riuscito.","No se pudo guardar.","Det gick inte att spara."};
+        blurb_.NewText(messages[Language()]);
+    }
+    void ShowHint(PcOption option)
+    {
+        const bool editable=BindingIndex(option)<0 && !Value(option,*host_.PcSettings()).empty() &&
+            option!=Row::Profile && page_!=PcPage::Languages;
+        const auto hint=std::find_if(std::begin(OptionHints),std::end(OptionHints),[option](const auto& text) {return text.option==option;});
+        constexpr Translation activeProfile{"This profile holds your current progress.","Ce profil contient votre progression actuelle.",
+            "Dieses Profil enthaelt den aktuellen Fortschritt.","Questo profilo contiene i progressi attuali.",
+            "Este perfil contiene tu progreso actual.","Den har profilen innehaller dina aktuella framsteg."};
+        const auto row=offset_+highlightedRow_;
+        const bool active=option==Row::Profile && row<profileNames_.size() &&
+            profileNames_[row]==state_->services.profiles->ActiveProfile();
+        blurb_.NewText(active?activeProfile[Language()]:hint!=std::end(OptionHints)?hint->text[Language()]:"");
+        arrows_.SetCurrentItem(editable && page_!=PcPage::Options && !SliderSteps(option)?ValueKey(highlightedRow_):0);
+    }
+    void UpdateDeleteHint()
+    {
+        if(page_!=PcPage::Profiles)return;
+        auto& services=state_->services;
+        auto& resources=*services.ui->resources;
+        const auto row=offset_+highlightedRow_;
+        const bool available=row<profileNames_.size() && profileNames_[row]!=services.profiles->ActiveProfile();
+        const auto icon=hashString("PC_DEL_ICON"),label=hashString("PC_DEL_TEXT");
+        resources.SetObjectVisibility(state_->screen,icon,available);
+        resources.SetObjectVisibility(state_->screen,label,available);
+        if(!available)return;
+        const char* glyph=resources.PromptDevice()==platform::NativePromptDevice::Keyboard?"\x9c":"\x88";
+        constexpr Translation caption{"Delete","Supprimer","Loeschen","Elimina","Eliminar","Ta bort"};
+        const auto setChanged=[&](std::uint32_t key,const char* text) {
+            const auto* current=static_cast<const FlailerTextChunk*>(resources.FindObject(state_->screen,key,1));
+            if(current && std::strcmp(current->text,text))resources.SetLocalizedText(state_->screen,key,text);
+        };
+        setChanged(icon,glyph);setChanged(label,caption[Language()]);
+    }
+    void BeginProfileEditor(std::size_t row,std::uint32_t key)
+    {
+        auto& services=state_->services;
+        auto& resources=*services.ui->resources;
+        resources.CloneProfileKeyboard(state_->screen);
+        const auto* current=resources.FindObject(state_->screen,key,1);
+        Require(current,"Profile name has no selected row");
+        profileEditor_=std::make_unique<NativeProfileNameEditor>(services,state_->screen,current->topLeftY,row>=4);
+        profileGridVisible_=false;
+        arrows_.SetCurrentItem(0);
+        RefreshProfileEditor();
+    }
+    void RefreshProfileEditor()
+    {
+        const bool visible=profileEditor_->GridVisible();
+        if(visible!=profileGridVisible_) {
+            profileGridVisible_=visible;
+            Redraw();
+            if(visible) {
+                auto& resources=*state_->services.ui->resources;
+                for(std::size_t row=0;row<RowCount();++row) {
+                    if(highlightedRow_>=4?row>=4:row<5)continue;
+                    resources.SetObjectVisibility(state_->screen,0x52e039f3u+static_cast<std::uint32_t>(row),0);
+                    resources.SetObjectVisibility(state_->screen,ValueKey(row),0);
+                }
+            }
+        }
+        constexpr Translation picking{"Choose letters. Select Done to create.","Choisissez les lettres, puis Terminer.",
+            "Buchstaben waehlen, dann Fertig.","Scegli le lettere, poi Fine.","Elige las letras y pulsa Listo.","Valj bokstaver och sedan Klar."};
+        constexpr Translation typing{"Type the name. Enter creates it. Esc cancels.","Saisissez le nom. Entree confirme. Echap annule.",
+            "Namen eingeben. Enter bestaetigt. Esc bricht ab.","Scrivi il nome. Invio crea. Esc annulla.",
+            "Escribe el nombre. Intro crea. Esc cancela.","Skriv namnet. Enter skapar. Esc avbryter."};
+        blurb_.NewText((visible?picking:typing)[Language()]);
+    }
+    void HandleEvent(ScreenMessage message,ScreenCallbackData& data) override
+    {
+        auto& services=state_->services;
+        if(profileEditor_) {
+            const bool previousGrid=profileEditor_->GridVisible();
+            const auto result=profileEditor_->HandleEvent(message,data);
+            std::string created;
+            if(result==NativeProfileNameEditor::Result::Accept) {
+                created=profileEditor_->Name();
+                while(!created.empty() && (created.back()==' ' || created.back()=='.'))created.pop_back();
+                if(!services.profiles->CreateProfile(created)) {ReportError(services.profiles->LastError());return;}
+            }
+            if(result!=NativeProfileNameEditor::Result::Editing) {
+                profileEditor_.reset();RefreshProfiles();
+                const auto profile=std::find(profileNames_.begin(),profileNames_.end(),created);
+                if(profile!=profileNames_.end()) {
+                    const auto index=static_cast<std::size_t>(profile-profileNames_.begin());
+                    const auto first=index+1>RowCount()?index+1-RowCount():0;
+                    const auto offset=std::clamp(offset_,first,index);
+                    if(offset_!=offset) {offset_=offset;RefreshProfiles();}
+                    auto* screen=services.screens->active->FindFlailerScreen(static_cast<std::int32_t>(state_->screen));
+                    if(screen && screen->menu)screen->menu->SetActiveMenuItem(0x52e039f3u+static_cast<std::uint32_t>(index-offset_));
+                }
+                ShowHint(OptionAt(offset_+std::min(highlightedRow_,RowCount()-1)));
+            } else if(previousGrid!=profileEditor_->GridVisible())RefreshProfileEditor();
+            if(message==ScreenMessage::Tick)blurb_.Animate();
+            return;
+        }
+        if(message==ScreenMessage::LeaveScreen && page_==PcPage::Profiles && services.profiles->ChoosingAtStartup()) {
+            data.value=0;data.sound=0;
+            RequestNativeMenuExit(services);return;
+        }
+        if(message==ScreenMessage::PopupDismiss) {
+            if(data.value==NativeMenuExitResult) {applicationDebugExitRequested=true;return;}
+            if(!deleteProfile_.empty()) {
+                auto profile=std::move(deleteProfile_);deleteProfile_.clear();
+                if(data.value==1) {
+                    const bool deleted=services.profiles->DeleteProfile(profile);
+                    RefreshProfiles();
+                    services.screens->active->SetActiveMenuItem(0x52e039f3u);
+                    if(!deleted)ReportError(services.profiles->LastError());
+                }
+            }
+            return;
+        }
+        if(message==ScreenMessage::Tick) {
+            UpdateDeleteHint();
+            if((page_==PcPage::Gamepad || page_==PcPage::PlayerTwo) && hasDualSense_!=host_.HasDualSense(Port()))Redraw();
+            if(capture_>=0)PollBinding();
+            if(page_==PcPage::PlayerTwo) {
+                const auto name=host_.InputDeviceName(Port());
+                if(name!=deviceName_) {deviceName_=name;Redraw();}
+            }
+            for(auto& slider:sliders_)if(slider)slider->Animate();
+            blurb_.Animate();arrows_.Animate();return;
+        }
+        const auto row=data.key-0x52e039f3u;
+        if(row>=RowCount())return;
+        if((message==ScreenMessage::Next && row+1==RowCount() && offset_+RowCount()<OptionCount()) ||
+           (message==ScreenMessage::Previous && row==0 && offset_>0)) {
+            if(message==ScreenMessage::Next)++offset_;
+            else --offset_;
+            data.value=1;
+            Redraw();
+            ShowHint(OptionAt(offset_+row));
+            services.ui->sound->Play(data.sound);
+            return;
+        }
+        if((message==ScreenMessage::Next && row+1==RowCount() && offset_>0) ||
+           (message==ScreenMessage::Previous && row==0 && OptionCount()>RowCount())) {
+            offset_=message==ScreenMessage::Next?0:OptionCount()-RowCount();
+            Redraw();
+        }
+        const auto option=OptionAt(offset_+row);
+        if(message==ScreenMessage::ItemEvent && data.value==17 && option==Row::Profile) {
+            AskDelete(profileNames_[offset_+row],data.joystickPort);return;
+        }
+        if(message==ScreenMessage::Highlight) {
+            highlightedRow_=row;ShowHint(option);
+            return;
+        }
+        if(SliderSteps(option) && (message==ScreenMessage::Left || message==ScreenMessage::Right ||
+            message==ScreenMessage::Select || message==ScreenMessage::SliderDrag || message==ScreenMessage::SliderCommit)) {
+            AdjustSlider(row,option,message,data);return;
+        }
+        const bool selected=message==ScreenMessage::Select;
+        if(!selected && message!=ScreenMessage::Left && message!=ScreenMessage::Right)return;
+        const int direction=message==ScreenMessage::Left?-1:1;
+        if(selected) {
+            if(option>=Row::English && option<=Row::Swedish) {
+                services.ui->language->SetLanguage(static_cast<int>(option)-static_cast<int>(Row::English));
+                Redraw();
+                if(services.profiles->SaveProfile())ShowHint(option);
+                else ReportError(services.profiles->LastError());
+                return;
+            }
+            switch(option) {
+            case Row::Audio:services.screens->ChangeToScreen("Audio Options",true);return;
+            case Row::Controls:OpenPcPage(services,PcPage::Controls);return;
+            case Row::Graphics:OpenPcPage(services,PcPage::Graphics);return;
+            case Row::Profiles:OpenPcPage(services,PcPage::Profiles);return;
+            case Row::Languages:OpenPcPage(services,PcPage::Languages);return;
+            case Row::Credits:services.screens->ChangeToScreen("Credits",true);return;
+            case Row::ResolutionPage:OpenPcPage(services,PcPage::Resolution);return;
+            case Row::Advanced:OpenPcPage(services,PcPage::Advanced);return;
+            case Row::AntialiasPage:OpenPcPage(services,PcPage::Antialiasing);return;
+            case Row::Keyboard:OpenPcPage(services,page_==PcPage::PlayerTwo?PcPage::KeyboardTwo:PcPage::Keyboard);return;
+            case Row::Gamepad:OpenPcPage(services,PcPage::Gamepad);return;
+            case Row::Player:OpenPcPage(services,PcPage::PlayerTwo);return;
+            case Row::Layouts:services.screens->ChangeToScreen("Joystick PreConfig",true);return;
+            case Row::Hud:gDisplayOptionsChangeManager.Start(*services.frontend);services.screens->ChangeToScreen("Display Options",true);return;
+            case Row::SaveLoad:services.screens->ChangeToScreen("Phils Load Save",true);return;
+            case Row::Name:services.screens->ChangeToScreen("NameEntry",true);return;
+            case Row::NewProfile:
+                BeginProfileEditor(row,data.key);
+                return;
+            case Row::Profile: {
+                const bool startup=services.profiles->ChoosingAtStartup();
+                if(!services.profiles->SelectProfile(profileNames_[offset_+row])) {
+                    ReportError(services.profiles->LastError());return;
+                }
+                if(startup)services.screens->MoveToPreviousScreen(1,false,data.joystickPort);
+                else {RefreshProfiles();ShowHint(option);}
+                return;
+            }
+            default:break;
+            }
+            if(BindingIndex(option)>=0) {
+                capture_=static_cast<int>(offset_+row);
+                host_.BeginBindingCapture(Port());
+                constexpr Translation waiting{"Press a key. Esc cancels.","Nouvelle touche. Echap annule.",
+                    "Neue Taste druecken. Esc bricht ab.","Premi un tasto. Esc annulla.",
+                    "Pulsa una tecla. Esc cancela.","Tryck en knapp. Esc avbryter."};
+                blurb_.NewText(waiting[Language()]);Redraw();return;
+            }
+        }
+        auto settings=*host_.PcSettings();
+        bool display=false;
+        switch(option) {
+        case Row::Resolution: {
+            auto modes=host_.MenuDisplayModes();
+            if(settings.fullscreen) {
+                modes.insert(modes.begin(),{0,0});
+                settings.fullscreenSize=CycleDisplayChoice(settings.fullscreenSize,modes,direction);
+            } else {
+                const auto size=CycleDisplayChoice({settings.width,settings.height},modes,direction);
+                settings.width=size.first;settings.height=size.second;
+            }
+            display=true;break;
+        }
+        case Row::Window:settings.fullscreen=!settings.fullscreen;display=true;break;
+        case Row::Vsync:settings.vsync=!settings.vsync;display=true;break;
+        case Row::FrameLimit: {
+            constexpr int limits[]{0,30,40,45,50,60,75,90,100,120,144,165,180,200,240,300,360,480};
+            settings.frameLimit=Cycle(settings.frameLimit,limits,direction);
+            break;
+        }
+        case Row::Aspect:
+            settings.raceAspect=CycleDisplayChoice(settings.raceAspect,nativeAspectChoices(host_.MenuDisplayModes()),direction);
+            display=true;break;
+        case Row::Scaling:settings.sharpScaling=!settings.sharpScaling;break;
+        case Row::RenderScale: {
+            const auto scale=std::clamp(settings.renderScale+direction,0,8);
+            if(scale==settings.renderScale) {data.sound=0;return;}
+            settings.renderScale=scale;
+            break;
+        }
+        case Row::Anisotropy: {
+            const auto current=settings.textureFilter==NativeTextureFilter::Anisotropic?settings.anisotropy:0;
+            const auto size=Cycle(current,PcAnisotropy,direction);
+            settings.textureFilter=size?NativeTextureFilter::Anisotropic:NativeTextureFilter::Trilinear;
+            if(size)settings.anisotropy=size;
+            break;
+        }
+        case Row::Detail:settings.render.maximumDetail=!settings.render.maximumDetail;break;
+        case Row::Reflections:settings.render.reflections=(settings.render.reflections+direction+3)%3;break;
+        case Row::Antialiasing: {
+            constexpr NativeAntialiasing modes[]{NativeAntialiasing::Off,NativeAntialiasing::Msaa2,NativeAntialiasing::SmaaHigh};
+            const auto old=settings.antialiasing;
+            const auto mode=old>=NativeAntialiasing::SmaaHigh?NativeAntialiasing::SmaaHigh:
+                old>=NativeAntialiasing::Msaa2?NativeAntialiasing::Msaa2:old;
+            settings.antialiasing=Cycle(mode,modes,direction);break;
+        }
+        case Row::Quality:
+            if(settings.antialiasing<NativeAntialiasing::Msaa2) {data.sound=0;return;}
+            if(settings.antialiasing>=NativeAntialiasing::SmaaHigh)
+                settings.antialiasing=settings.antialiasing==NativeAntialiasing::SmaaHigh?
+                    NativeAntialiasing::SmaaUltra:NativeAntialiasing::SmaaHigh;
+            else settings.antialiasing=settings.antialiasing==NativeAntialiasing::Msaa2?
+                    NativeAntialiasing::Msaa4:NativeAntialiasing::Msaa2;
+            break;
+        case Row::PictureDefaults:
+            if(!selected)return;
+            settings.render.brightness=0;settings.render.contrast=settings.render.gamma=100;break;
+        case Row::Fps:settings.showFps=!settings.showFps;break;
+        case Row::AdaptiveTriggers: {
+            if(!host_.HasDualSense(Port()))return;
+            auto& enabled=settings.input.profiles[Port()].adaptiveTriggers;
+            enabled=!enabled;break;
+        }
+        case Row::PoliceRadioSpeaker: {
+            if(!host_.HasDualSense(Port()))return;
+            auto& enabled=settings.input.profiles[Port()].policeRadioSpeaker;
+            enabled=!enabled;break;
+        }
+        case Row::IconStyle:settings.input.promptStyle=(settings.input.promptStyle+direction+3)%3;break;
+        case Row::InputMode: {
+            auto& mode=settings.input.deviceMode[Port()];
+            constexpr auto count=static_cast<int>(platform::NativeDeviceMode::Disabled)+1;
+            mode=static_cast<platform::NativeDeviceMode>((static_cast<int>(mode)+direction+count)%count);
+            break;
+        }
+        case Row::Player2Pad:
+            if(settings.input.deviceMode[1]==platform::NativeDeviceMode::Keyboard ||
+                settings.input.deviceMode[1]==platform::NativeDeviceMode::Disabled) {data.sound=0;return;}
+            std::swap(settings.input.controller[0],settings.input.controller[1]);
+            std::swap(settings.input.deviceKey[0],settings.input.deviceKey[1]);break;
+        case Row::PadDefaults:
+            if(!selected)return;
+            settings.input.profiles[0]=platform::NativeGamepadProfile{};
+            settings.input.steeringSensitivity=100;settings.input.promptStyle=0;break;
+        case Row::KeyboardDefaults:
+            if(!selected)return;
+            if(Port()==0)settings.input.keys=platform::NativeInputSettings{}.keys;
+            else settings.input.player2Keys=platform::NativeInputSettings{}.player2Keys;
+            settings.input.zoneKeys[Port()]=platform::NativeInputSettings{}.zoneKeys[Port()];
+            break;
+        default:data.sound=0;return;
+        }
+        Save(settings,display);
+    }
+    void PollBinding()
+    {
+        auto settings=*host_.PcSettings();
+        const auto option=OptionAt(capture_);
+        const auto index=static_cast<std::size_t>(BindingIndex(option));
+        const auto key=host_.CapturedKey();
+        if(!key)return;
+        capture_=-1;host_.BeginBindingCapture(-1);
+        ShowHint(option);
+        if(key==0x1b) {Redraw();return;}
+        auto& keys=Port()==0?settings.input.keys:settings.input.player2Keys;
+        auto& zones=settings.input.zoneKeys[Port()];
+        auto& binding=index>=20?zones[index-20]:keys[index];
+        const auto swapKey=[&](std::uint16_t& candidate) {
+            if(&candidate!=&binding && candidate==key)candidate=binding;
+        };
+        for(std::size_t i=0;i<18;++i)swapKey(keys[i]);
+        for(auto& zone:zones)swapKey(zone);
+        binding=key;
+        Save(settings,false);
+    }
+    PcPage page_;
+    const PcPageDescription& description_;
+    NativeApplicationHost& host_;
+    FlailerAnimatedBlurb blurb_;
+    FlailerLeftRightArrowScroll arrows_;
+    std::size_t offset_{},highlightedRow_{};
+    std::vector<std::string> profileNames_;
+    std::int32_t capture_{-1};
+    std::string deleteProfile_;
+    std::unique_ptr<NativeProfileNameEditor> profileEditor_;
+    bool profileGridVisible_{};
+    bool renderPreview_{};
+    std::array<float,7> labelScale_{},valueScale_{};
+    std::array<std::optional<FlailerSlider>,VisiblePcRows> sliders_;
+    std::string deviceName_;
+    bool hasDualSense_{},radioPreview_{};
+};
+} // namespace
+
+std::array<FlailerScreenConfig,11>& NativeOptionsScreenConfigurations()
+{
+    static constexpr std::int32_t Help[]{800057,800058,800059,0};
+    static auto configurations=[] {
+        std::array<FlailerScreenConfig,11> result{};
+        for(std::size_t i=0;i<result.size();++i) {
+            result[i].name=PcPages[i].name;
+            result[i].callback=&NativeOptionsScreen::Callback;
+            result[i].screenCount=1;
+            result[i].screenIds[0]=static_cast<std::int32_t>(hashString(PcPages[i].name));
+            result[i].helpItems=Help;
+        }
+        return result;
+    }();
+    return configurations;
+}
+
+void OpenStartupProfileMenu(MainMenuScreenServices& services)
+{
+    ClonePcPages(services);
+    OpenPcPage(services,PcPage::Profiles);
+}
+
 OptionsScreen::OptionsScreen(MainMenuScreenServices& services,std::uint32_t screen)
     : OptionsScreenBase(services,screen),
       blurb_(std::make_unique<FlailerAnimatedBlurb>(*services.ui,screen,0x75980cf0u,0x75980cf0u,0x70a404ecu))
@@ -198,6 +1327,7 @@ OptionsScreen::OptionsScreen(MainMenuScreenServices& services,std::uint32_t scre
     // PAL1EEB78 initializes only the embedded RumbleTimer word. Its Tick
     // and TriggerSomething callees are final JR RA/NOP and are not emitted.
     rumbleTimer_=0;
+
     if (gameTimeGetVideoMode(services.ui->clock)==1) {
         // Complete relevant constant-state2 path of actual16D198: find the
         // registered screen/menu/item, clear enabled bit1 and hide its object.
@@ -259,6 +1389,11 @@ void OptionsScreen::Callback(ScreenMessage message,ScreenCallbackData* data)
     if (message==ScreenMessage::ScreenActivate) {
         Require(optionsServices && data && !optionsOwner,
             "Options activation lacks actual services/data or duplicates a live owner");
+        if(optionsServices->pcHost) {
+            ClonePcPages(*optionsServices);
+            Install(std::make_unique<NativeOptionsScreen>(*optionsServices,data->key,PcPage::Options));
+            return;
+        }
         optionsOwner=std::make_unique<OptionsScreen>(*optionsServices,data->key);
     } else OptionsScreenBase::BaseCallback(message,data);
 }
@@ -490,7 +1625,25 @@ std::array<FlailerScreenConfig,2>& LanguageScreenConfigurations()
 namespace hp2::frontend {
 namespace {
 constexpr std::uint32_t AudioChannels63[7]={5,4,0,1,2,3,6};
+constexpr Translation AudioVolumeHints[]{
+    {"Set the music volume in menus.","Regler le volume de la musique des menus.","Lautstaerke der Menue-Musik einstellen.",
+        "Regola il volume della musica nei menu.","Ajusta el volumen de la musica en los menus.","Stall in musikvolymen i menyerna."},
+    {"Set the music volume during races.","Regler le volume de la musique en course.","Lautstaerke der Rennmusik einstellen.",
+        "Regola il volume della musica in gara.","Ajusta el volumen de la musica en carrera.","Stall in musikvolymen under lopp."},
+    {"Set the volume of sounds around the track.","Regler le volume des sons du circuit.","Lautstaerke der Streckengeraeusche einstellen.",
+        "Regola il volume dei suoni del circuito.","Ajusta el volumen de los sonidos de la pista.","Stall in volymen for ljud runt banan."},
+    {"Set the volume of tire sounds.","Regler le volume du bruit des pneus.","Lautstaerke der Reifengeraeusche einstellen.",
+        "Regola il volume dei suoni degli pneumatici.","Ajusta el volumen del ruido de los neumaticos.","Stall in volymen for dackljud."},
+    {"Set the volume of engine sounds.","Regler le volume du bruit des moteurs.","Lautstaerke der Motorengeraeusche einstellen.",
+        "Regola il volume dei suoni dei motori.","Ajusta el volumen del ruido de los motores.","Stall in volymen for motorljud."},
+    {"Set the volume of menu navigation sounds.","Regler le volume des sons de navigation.","Lautstaerke der Menue-Geraeusche einstellen.",
+        "Regola il volume dei suoni dei menu.","Ajusta el volumen de los sonidos del menu.","Stall in volymen for menyljud."},
+    {"Set the volume of voices and radio calls.","Regler le volume des voix et appels radio.","Lautstaerke fuer Stimmen und Funk einstellen.",
+        "Regola il volume delle voci e della radio.","Ajusta el volumen de las voces y la radio.","Stall in volymen for roster och radio."},
+};
+static_assert(std::size(AudioVolumeHints)==std::size(AudioChannels63));
 constexpr std::uint32_t MenuFirst63=0x52e039f3u;
+constexpr std::uint32_t MenuMaster=MenuFirst63-1u;
 
 bool SameAudioOptions63(const FrontendMusicSettings& first,const FrontendMusicSettings& second)
 {
@@ -507,6 +1660,8 @@ bool SameAudioOptions63(const FrontendMusicSettings& first,const FrontendMusicSe
 class AudioOptionsScreen final:public OptionsScreenBase {
     FrontendMusicSettings editing_;
     std::array<std::unique_ptr<FlailerSlider>,7> sliders_;
+    std::optional<FlailerSlider> master_;
+    bool masterPreview_{};
     FlailerScrollingMenuList scrolling_;
     FlailerLeftRightArrowScroll arrows_;
     FlailerAnimatedBlurb blurb_;
@@ -528,6 +1683,17 @@ public:
                 0xc866642bu+0x441u*static_cast<std::uint32_t>(index),
                 static_cast<std::int32_t>(AudioChannels63[index]),&editing_.savedVolumes[index],0.0f,1.0f);
         }
+        if(services.pcHost) {
+            constexpr Translation name{"Master Volume","Volume general","Gesamtlautstaerke",
+                "Volume generale","Volumen general","Huvudvolym"};
+            services.ui->resources->SetLocalizedText(screen,MenuMaster,name[MenuLanguage(services)]);
+            scrolling_.SetVisibleArea(MenuMaster,MenuFirst63+5);
+            scrolling_.AddObject(MenuMaster);
+            scrolling_.AddObject(hashString("PC_MASTER_BAR"));
+            scrolling_.AddObject(hashString("PC_MASTER_MARKER"));
+            master_.emplace(*services.ui,screen,MenuMaster,hashString("PC_MASTER_BAR"),hashString("PC_MASTER_MARKER"),
+                static_cast<float>(services.pcHost->PcSettings()->masterVolume)*0.01f);
+        }
         editing_.savedAudioMode=worldAudioGetMode();RedrawMode();
         constexpr std::uint32_t objects[]={0x52e039f3u,0x52e039f4u,0x52e039f5u,0x52e039f6u,
             0x52e039f7u,0x52e039f8u,0x52e039f9u,0x52e039fau,0x52e039fbu,0xaee77883u,0xaee77884u,
@@ -536,7 +1702,35 @@ public:
             0xa29f7a1cu,0xc8667db1u,0x2932dfcau};
         scrolling_.AddObjects(objects,std::size(objects));scrolling_.SetItemCount(11);
     }
+    ~AudioOptionsScreen() override {EndMasterPreview();}
     void HandleHighlight(ScreenMessage,ScreenCallbackData&,std::uint32_t) override {}
+    void EndMasterPreview() noexcept
+    {
+        if(std::exchange(masterPreview_,false))state_->services.pcHost->PreviewMasterVolume(std::nullopt);
+    }
+    void AdjustMaster(float fraction,bool drag,bool snap)
+    {
+        auto& host=*state_->services.pcHost;
+        auto settings=*host.PcSettings();
+        fraction=std::clamp(fraction,0.0f,1.0f);
+        const auto percentage=static_cast<int>(std::lround(fraction*100.0f));
+        const bool changed=master_->position.desiredValue!=fraction;
+        if(drag) {
+            host.PreviewMasterVolume(percentage);
+            masterPreview_=true;
+        } else EndMasterPreview();
+        if(!drag && settings.masterVolume!=percentage) {
+            settings.masterVolume=percentage;
+            std::string error;
+            if(!host.SavePcSettings(settings,error)) {
+                host.RecordSessionEvent("audio.settings_failed",error.c_str());
+                master_->ShowValue(host.PcSettings()->masterVolume*0.01f,true);
+                return;
+            }
+        }
+        master_->ShowValue(fraction,snap);
+        if(changed)master_->PlayChange(fraction);
+    }
     void RedrawMode()
     {
         constexpr std::uint32_t labels[]={0x1adb9u,0x1adb8u,0x1adbbu};
@@ -554,20 +1748,49 @@ public:
     void HandleEvent(ScreenMessage message,ScreenCallbackData& data) override
     {
         auto& state=*state_;auto& services=state.services;auto& ui=*services.ui;
+        const bool pointer=message==ScreenMessage::SliderDrag || message==ScreenMessage::SliderCommit;
+        if(data.key==MenuMaster && master_) {
+            if(pointer) {
+                AdjustMaster(FlailerSlider::VolumeAtPointer(data.value),message==ScreenMessage::SliderDrag,true);
+                return;
+            }
+            if(message==ScreenMessage::Highlight) {
+                ScreenCallbackData first{MenuFirst63,data.joystickPort,0,0};
+                scrolling_.HandleEvent(ScreenMessage::Highlight,first);
+                scrolling_.SetCurrentObject(MenuMaster);
+                constexpr Translation help{"Set the overall game volume.","Regler le volume general du jeu.","Gesamtlautstaerke des Spiels einstellen.",
+                    "Regola il volume generale del gioco.","Ajusta el volumen general del juego.","Stall in spelets huvudvolym."};
+                blurb_.NewText(help[MenuLanguage(services)]);
+                OptionsScreenBase::HandleHighlight(message,data,hashString("MI_0_MASK"));
+                arrows_.SetCurrentItem(0);return;
+            }
+            if(message==ScreenMessage::Left || message==ScreenMessage::Right || message==ScreenMessage::Select) {
+                const auto previous=services.pcHost->PcSettings()->masterVolume*0.01f;
+                AdjustMaster(previous+(message==ScreenMessage::Left?-1.0f:1.0f)*FlailerSlider::VolumeStep,false,false);
+                data.sound=0;return;
+            }
+        }
+        if(pointer) {
+            if(data.key>=MenuFirst63 && data.key<=MenuFirst63+6)
+                sliders_[data.key-MenuFirst63]->SetDisplayValue(FlailerSlider::VolumeAtPointer(data.value),true,true);
+            return;
+        }
         scrolling_.HandleEvent(message,data);arrows_.HandleEvent(message,data);
         if(message==ScreenMessage::LeaveScreen) {
+            EndMasterPreview();
             if(!SameAudioOptions63(editing_,services.frontend->musicSettings)) {
                 Commit();if(services.frontend->autoSave)services.screens->stack.Push("Autosave");
             }
         } else if(message==ScreenMessage::ScreenBack) data.sound=0;
-        else if(message==ScreenMessage::Previous && data.key==MenuFirst63)data.value=1;
+        else if(message==ScreenMessage::Previous && data.key==(services.pcHost?MenuMaster:MenuFirst63))data.value=1;
         else if(message==ScreenMessage::Next && data.key==0xaee77884u)data.value=1;
         else if(message==ScreenMessage::Highlight) {
-            std::int32_t label=0;
-            if(data.key>=MenuFirst63 && data.key<=MenuFirst63+8)label=0x24be4+static_cast<std::int32_t>(data.key-MenuFirst63);
-            else if(data.key==0xaee77883u)label=0x24bed;
-            else if(data.key==0xaee77884u)label=0x24bee;
-            blurb_.NewText(label);
+            const auto index=data.key-MenuFirst63;
+            if(index<std::size(AudioVolumeHints))blurb_.NewText(AudioVolumeHints[index][MenuLanguage(services)]);
+            else if(index==7 || index==8)blurb_.NewText(0x24be4+static_cast<std::int32_t>(index));
+            else if(data.key==0xaee77883u)blurb_.NewText(0x24bed);
+            else if(data.key==0xaee77884u)blurb_.NewText(0x24bee);
+            else blurb_.NewText("");
             OptionsScreenBase::HandleHighlight(message,data,scrolling_.GetCurrentMenuMask());
             arrows_.SetCurrentItem(data.key==0x52e039fau?0x2932dfcau:0);
         } else if(message==ScreenMessage::Left || message==ScreenMessage::Right) {
@@ -579,8 +1802,11 @@ public:
                     "Audio mode change could not reach its canonical mixer");
                 editing_.savedAudioMode=worldAudioGetMode();
                 RedrawMode();data.sound=message==ScreenMessage::Left?1:2;
-            } else if(data.key>=MenuFirst63 && data.key<=MenuFirst63+6)
-                sliders_[data.key-MenuFirst63]->StepValue(message==ScreenMessage::Left?-0.05000000074505806f:0.05000000074505806f,true);
+            } else if(data.key>=MenuFirst63 && data.key<=MenuFirst63+6) {
+                auto& slider=*sliders_[data.key-MenuFirst63];
+                slider.SetDisplayValue(slider.position.desiredValue+
+                    (message==ScreenMessage::Left?-1.0f:1.0f)*FlailerSlider::VolumeStep,true);
+            }
         } else if(message==ScreenMessage::Select) {
             if(data.key==0x52e039fbu) {
                 Commit();state.exit=std::make_unique<FlailerExitScreenAnimation>(ui,*services.screens,state.screen,"JukeBox Music",true);
@@ -599,7 +1825,8 @@ public:
                         sound::GetVolumeDefault(*ui.sound->volumes,channel)*scale)==WORLD_AUDIO_OK,"Volume reset rejected by mixer");
                 sound::SaveVolumesForSpeech(*ui.sound);
                 for(std::size_t index=0;index<7;++index) {
-                    editing_.savedVolumes[index]=mixer.GetCategoryVolume(AudioChannels63[index]);sliders_[index]->StepValue(0.0f,false);
+                    editing_.savedVolumes[index]=mixer.GetCategoryVolume(AudioChannels63[index]);
+                    sliders_[index]->ShowValue(sliders_[index]->ValueToDisplay(editing_.savedVolumes[index]));
                 }
             } else if(data.key==0xaee77884u) {
                 Require(editing_.count>=0 && static_cast<std::size_t>(editing_.count)<=editing_.rows.size(),"Music settings count is invalid");
@@ -610,6 +1837,7 @@ public:
                 editing_.menuState={};editing_.menuMode=0;editing_.enabledGenres=255;
             } else data.sound=0;
         } else if(message==ScreenMessage::Tick) {
+            if(master_)master_->Animate();
             for(auto& slider:sliders_)slider->Animate();
             blurb_.Animate();
         }
@@ -1186,6 +2414,24 @@ constexpr std::int32_t CreditsHelp[]={800080,800081,800079,0};
 constexpr std::int32_t CreditsScrollHelp[]={800082,800083,800084,0};
 constexpr const char* CreditsNames[]={"Credits","Credits FE Movie","Credits Reward movie",
     "BBG Creation movie","BBG Credits movie","EACredits","BBGCredits"};
+constexpr std::uint32_t CreditsBackground=0x95ad096bu;
+constexpr std::uint32_t CreditsFirstChoice=0x52e039f3u;
+constexpr std::uint32_t CreditsHintText=0x75980cf0u;
+constexpr struct {
+    const char* destination;
+    Translation hint;
+} CreditsChoices[]={
+    {"EACredits",{"Read the Electronic Arts credits.","Voir les credits Electronic Arts.","Die Mitwirkenden von Electronic Arts ansehen.",
+        "Leggi i crediti Electronic Arts.","Consulta los creditos de Electronic Arts.","Las Electronic Arts eftertexter."}},
+    {"BBG Credits movie",{"See the Black Box team credits.","Voir les credits de l'equipe Black Box.","Die Mitwirkenden von Black Box ansehen.",
+        "Guarda i crediti del team Black Box.","Mira los creditos del equipo Black Box.","Se Black Box-teamets eftertexter."}},
+    {"Credits FE Movie",{"Replay the game's opening movie.","Revoir le film d'introduction.","Das Intro des Spiels erneut ansehen.",
+        "Rivedi il filmato introduttivo.","Vuelve a ver el video de apertura.","Spela upp spelets intro igen."}},
+    {"BBG Creation movie",{"See how the game was made.","Voir les coulisses de la creation du jeu.","Einen Blick hinter die Kulissen werfen.",
+        "Scopri come e stato creato il gioco.","Mira como se hizo el juego.","Se hur spelet skapades."}},
+    {"Credits Reward movie",{"Watch the unlocked bonus movie.","Voir le film bonus debloque.","Das freigeschaltete Bonusvideo ansehen.",
+        "Guarda il filmato bonus sbloccato.","Mira el video de bonificacion desbloqueado.","Se den upplasta bonusfilmen."}},
+};
 FrontendStartupServices* creditsServices{};
 
 MainMenuScreenServices& CreditsMenus() {return *creditsServices->menus;}
@@ -1208,11 +2454,28 @@ void CreditsGrayItem(MainMenuScreenServices& menus,std::uint32_t screen,std::uin
 class CreditsScreen final {
 public:
     CreditsScreen(MainMenuScreenServices& menus,std::uint32_t screen)
-        : menus_(menus),screen_(screen),slide_(*menus.ui,screen,0xaed1a723u,0x718cd8c3u,0x95ad096bu),
+        : menus_(menus),screen_(screen),slide_(*menus.ui,screen,0xaed1a723u,0x718cd8c3u,CreditsBackground),
           highlight_(*menus.ui,screen,0xab671c9au,menus.ui->animationSettings.highlightColor)
     {
         menus_.screens->StartMovie("MOVIES\\options_movie_new.AVI");
         CreditsGrayItem(menus_,screen_,0x52e039f7u,ShouldShowRewardMovieOption());
+        auto& resources=*menus_.ui->resources;
+        const auto* source=static_cast<const FlailerTextChunk*>(resources.FindObject(CreditsBackground,CreditsHintText,1));
+        const auto* first=static_cast<const FlailerTextChunk*>(resources.FindObject(screen_,CreditsFirstChoice,1));
+        Require(source && first,"Credits hint has no frontend text template");
+        auto& hint=resources.CloneNativeText(screen_,*source,CreditsHintText);
+        hint.parentKey=0;
+        hint.SetClipToPoly(0);
+        hint.ClearFormatOptions(0x10);
+        hint.authoredFlags=first->authoredFlags;
+        hint.SetColor(first->color);
+        hint.SetTopLeftX(191.0f);
+        hint.SetTopLeftY(345.0f);
+        hint.SetLanguageID(0);
+        hint.SetString("");
+        // Credits keeps Options behind its panel. Its hint is installed afresh
+        // when Options is reactivated and highlights the selected row.
+        resources.SetLocalizedText(CreditsBackground,CreditsHintText,"");
     }
     bool ShouldShowRewardMovieOption() const
     {
@@ -1231,11 +2494,13 @@ public:
     {
         highlight_.HandleEvents(message,data);
         if (message==ScreenMessage::Tick)slide_.Tick();
-        else if (message==ScreenMessage::Select && data.key>=0x52e039f3u && data.key<=0x52e039f7u) {
-            static constexpr const char* destinations[]={"EACredits","BBG Credits movie",
-                "Credits FE Movie","BBG Creation movie","Credits Reward movie"};
-            menus_.screens->ChangeToScreen(destinations[data.key-0x52e039f3u],true);
-        }
+        const auto index=data.key-CreditsFirstChoice;
+        if(index>=std::size(CreditsChoices))return;
+        const auto& choice=CreditsChoices[index];
+        if(message==ScreenMessage::Highlight)
+            menus_.ui->resources->SetFittedText(screen_,CreditsHintText,menus_.ui->language,
+                choice.hint[MenuLanguage(menus_)]);
+        else if(message==ScreenMessage::Select)menus_.screens->ChangeToScreen(choice.destination,true);
     }
 private:
     MainMenuScreenServices& menus_;
@@ -1265,6 +2530,7 @@ public:
             Require(ui.movie->InitFile(movie)==1,"Credits movie could not open its original authored AVI");
             ui.resources->SetObjectVisibility(screen,0xb070dbc9u,0);
             ui.resources->SetGroupVisibility(screen,0xb73c8d23u,0);
+            bitmap_->SetNativeFullscreenMovie(true);
         } catch (...) {
             const auto primary=std::current_exception();
             if (const auto cleanup=ui.movie->Shutdown()) {
@@ -1285,6 +2551,7 @@ public:
         // unique_ptr destruction is never a throwing acknowledgement path.
         if (retired_)return;
         services_.menus->ui->movie->Close();
+        bitmap_->SetNativeFullscreenMovie(false);
         // Ordinary transitions restart music; terminal retirement has closed
         // admission and must not create another physical audio borrower.
         if (!carLoader.ShuttingDown())CreditsMusicStart(*services_.menus);

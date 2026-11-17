@@ -1079,14 +1079,16 @@ void Car::DamageAbove(const float eye[3],const float forward[3],
     // Full final PAL135280. The scalar is produced even if the subsequent
     // damage-cap branch is suppressed by NIS, race policy or flow state.
     hp2::Require(eye && forward,"Car bearing has no actual camera vectors");
-    const float delta[3]={eye[0]-position[0],eye[1]-position[1],eye[2]-position[2]};
-    const float length=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2]);
-    const float reciprocal=1.0f/length;
-    const float direction[3]={delta[0]*reciprocal,delta[1]*reciprocal,delta[2]*reciprocal};
-    const float dot=(forward[0]*direction[0]+forward[1]*direction[1])+forward[2]*direction[2];
-    const float crossZ=forward[0]*direction[1]-forward[1]*direction[0];
-    trackerBearing=(dot+1.0f)*0.5f;
-    if (crossZ>=0.0f)trackerBearing=-trackerBearing;
+    if(display.frame.AdvancesPresentation()) {
+        const float delta[3]={eye[0]-position[0],eye[1]-position[1],eye[2]-position[2]};
+        const float length=std::sqrt((delta[0]*delta[0]+delta[1]*delta[1])+delta[2]*delta[2]);
+        const float reciprocal=1.0f/length;
+        const float direction[3]={delta[0]*reciprocal,delta[1]*reciprocal,delta[2]*reciprocal};
+        const float dot=(forward[0]*direction[0]+forward[1]*direction[1])+forward[2]*direction[2];
+        const float crossZ=forward[0]*direction[1]-forward[1]*direction[0];
+        trackerBearing=(dot+1.0f)*0.5f;
+        if (crossZ>=0.0f)trackerBearing=-trackerBearing;
+    }
     for (const auto* player:display.players.playersByNumber)
         if (player && carFramePlayerReplayActive(player))return;
     if (!display.parameters.specialPursuit || display.sessionState!=3 || !display.pursuit)return;
@@ -1491,16 +1493,15 @@ static float elapsedSeconds(int32_t nowTicks, int32_t startTicks)
 
 void carMotionRequestRecovery(CarMotionState *state, const CarRecoveryPolicy *policy)
 {
-    if (policy->registryGuard && policy->positiveEntryGate > 0) {
+    const auto* parameters = policy->parameters;
+    if (parameters && parameters->specialPursuit && parameters->policeDriverCount > 0) {
         hp2::Require(state->owner && state->owner->driverInfo,"Car recovery has no live driver selection");
-    }
-    if (policy->registryGuard && policy->positiveEntryGate > 0 && state->owner->driverInfo->driverClass == 2) {
-        struct PursuitCollisionGroup* group = NULL;
-        /* The original void method requires its global manager and actual
-         * Car to exist on this branch. A missing native binding is an
-         * invariant failure, never a successful no-group substitution. */
-        if (!carRecoveryFindForMotion(policy->pursuit, state, &group)) abort();
-        if (group) return;
+        if (state->owner->driverInfo->driverClass == 2) {
+            PursuitCollisionGroup* group = nullptr;
+            hp2::Require(carRecoveryFindForMotion(policy->pursuit, state, &group),
+                "Car recovery has no live pursuit group registry");
+            if (group) return;
+        }
     }
     state->recoveryRequested = 1;
 }

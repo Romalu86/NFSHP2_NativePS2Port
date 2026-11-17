@@ -5,6 +5,7 @@
 #include "bware/inc/bWare.hpp"
 #include "indep/inc/eMath.hpp"
 #include "indep/inc/eLight.hpp"
+#include "indep/inc/Texture.hpp"
 #include "bware/inc/bWare.hpp"
 #include "bware/inc/bMath.hpp"
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <tuple>
+#include <unordered_set>
 
 namespace { int32_t currentZoneNumber=-1; } // PAL3302B0.
 int32_t sceneryCurrentZoneNumber(void) {return currentZoneNumber;} // PAL14F8E0.
@@ -157,6 +160,47 @@ float sceneryReal(const std::uint8_t* data)
     Require(std::isfinite(result),"Scenery position is not finite");return result;
 }
 }
+
+struct SceneryResources::PausedView {
+    // Retained commands borrow immutable scenery strips and catalogue entries.
+    // The track owns the cache, while the live frame still owns ordering and
+    // all particle, feedback and UI packets.
+    struct Inputs {
+        const CarCinematicScreen* view{};
+        const EcstasyRenderTarget* target{};
+        const EnvironmentMap* environment{};
+        const TextureInfo* specular{};
+        const TextureInfo* frontendEnvironment{};
+        std::uint64_t bindingRevision{};
+        std::uint32_t mask{},renderEggs{};
+        std::int32_t worldFrames{},applicationState{};
+        std::array<int,4> targetState{};
+        bool maximumDetail{};
+        std::array<bool,5> materialState{};
+        std::array<std::int32_t,5> reflectionBlend{};
+        std::array<float,16> environmentMatrix{},cameraMatrix{};
+        std::array<float,4> eye{},forward{};
+        std::array<float,3> viewScales{};
+        std::array<float,3> sun{},ambient{},sunlightDirection{},sunlightColor{};
+        float ambientSearchLimit{};
+        EcstasyViewMatrices matrices{};
+
+        auto Values() const noexcept {
+            return std::tie(view,target,environment,specular,frontendEnvironment,bindingRevision,
+                mask,renderEggs,worldFrames,applicationState,targetState,maximumDetail,materialState,reflectionBlend,
+                environmentMatrix,cameraMatrix,eye,forward,viewScales,sun,ambient,sunlightDirection,
+                sunlightColor,ambientSearchLimit);
+        }
+        bool operator==(const Inputs& other) const noexcept {
+            return Values()==other.Values() && std::memcmp(&matrices,&other.matrices,sizeof(matrices))==0;
+        }
+    } inputs;
+    std::vector<const LightGroup*> lightGroups;
+    std::vector<EcstasyDrawCommand> commands;
+    std::uint64_t alphaGroups{};
+    std::int32_t zone{};
+    SceneryNativeRenderStatistics statistics;
+};
 
 struct SceneryResources::SectionStorage {
     ScenerySection native{};
@@ -593,6 +637,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
     for(;visibleLod<3;++visibleLod)
         if(originalPixels>=model.minimumPixels[visibleLod] && model.levels[visibleLod].solid)break;
     if(visibleLod==3)return visibleLod;
+    if(nativeRenderSettings().maximumDetail && model.levels[0].solid)return 0;
     const auto detailPixels=nativeDetailLodPixels(originalPixels,
         nativeSceneryDetailDistanceFactor);
     std::size_t lod=0;
@@ -617,7 +662,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
 }
 
 void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame,
-    std::uint32_t viewMask,std::int32_t worldFrames)
+    std::uint32_t viewMask,std::int32_t worldFrames,bool retainPausedView,bool emitGeometry)
 {
     // PAL150D98/150B10/150378/14FE18/150EB8. Native vectors replace only the
     // original temporary cull-list allocation; their entries still borrow
@@ -634,6 +679,52 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
     std::copy_n(view.matrices.worldToScreenClip,16,worldToScreenClip.begin());
     const float distanceScale=nativeViewDistanceScale(view.id);
     nativeRenderStatistics_={};
+    auto* resources=models_->resourceRegistry;
+    std::unique_ptr<PausedView>* paused=nullptr;
+    std::optional<PausedView::Inputs> pauseInputs;
+    const auto start=frame.commands_.size();
+    const auto startAlphaGroup=frame.nextAlphaGroup_;
+    if(!retainPausedView) {
+        for(auto& cached:pausedViews_)cached.reset();
+    } else if(resources && view.id>=0 && static_cast<std::size_t>(view.id)<pausedViews_.size()) {
+        Require(frame.State()==EcstasyFrame::Phase::Building && view.target,"Paused scenery has no live capture target");
+        paused=&pausedViews_[static_cast<std::size_t>(view.id)];
+        auto& inputs=pauseInputs.emplace();
+        const auto& lights=resources->Lights();
+        inputs.view=&view;inputs.target=view.target;inputs.environment=frame.environment_;
+        inputs.specular=frame.specularFalloffTexture_;
+        inputs.frontendEnvironment=frame.frontendEnvironmentTexture_;
+        const auto* root=models_->catalogueRoot ? models_->catalogueRoot:models_;
+        inputs.bindingRevision=root->bindingRevision;
+        inputs.mask=viewMask;inputs.renderEggs=ecstasyCaptureNativeRenderEggState();
+        inputs.worldFrames=worldFrames;inputs.applicationState=frame.ApplicationState();
+        inputs.targetState={{view.target->id,view.target->width,view.target->height,view.target->opaqueOnly}};
+        inputs.maximumDetail=nativeRenderSettings().maximumDetail;
+        inputs.materialState={{frame.zWriteEnabled_,frame.dashboardProjection_,frame.inGameMaterials_,
+            frame.environmentUpdated_,environmentMappingEnabled!=0}};
+        inputs.reflectionBlend=nativeRenderPolicy.reflectionBlend;
+        if(const auto* matrix=frame.EnvironmentMatrix())std::copy_n(matrix,16,inputs.environmentMatrix.begin());
+        std::copy_n(camera.matrix,16,inputs.cameraMatrix.begin());
+        std::copy_n(camera.eye,4,inputs.eye.begin());
+        std::copy_n(camera.forward,4,inputs.forward.begin());
+        inputs.viewScales={{view.pixelScale,sourcePixelScale,distanceScale}};
+        inputs.sun=resources->Sun().Vector();inputs.ambient=lights.ambientColor;
+        inputs.sunlightDirection=lights.sunlightDirection;inputs.sunlightColor=lights.sunlightColor;
+        inputs.ambientSearchLimit=lights.ambientSearchLimitSquared;
+        inputs.matrices=view.matrices;
+        if(*paused && (*paused)->inputs==inputs && (*paused)->lightGroups==lights.Groups()) {
+            const auto& cached=**paused;
+            if(view.id==1)currentZoneNumber=cached.zone;
+            nativeRenderStatistics_=cached.statistics;
+            if(!emitGeometry)return;
+            frame.commands_.insert(frame.commands_.end(),cached.commands.begin(),cached.commands.end());
+            for(auto index=start;index<frame.commands_.size();++index)
+                if(auto& group=frame.commands_[index].alphaGroup)group+=startAlphaGroup;
+            frame.nextAlphaGroup_+=cached.alphaGroups;
+            nativeRenderStatistics_.reusedCommands=cached.commands.size();
+            return;
+        }
+    }
     const bool extendedRange=distanceScale>1.0f;
     if(extendedRange) {
         if(renderIdentityScratch_.empty()) {
@@ -653,7 +744,7 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         }
     }
     bool journalSample=false;
-    if(view.id>=0 && view.id<static_cast<std::int32_t>(journalTicks_.size())) {
+    if(emitGeometry && view.id>=0 && view.id<static_cast<std::int32_t>(journalTicks_.size())) {
         const auto index=static_cast<std::size_t>(view.id);
         const auto bit=std::uint32_t(1)<<index;
         const auto ticks=platform::TicksNow();
@@ -749,19 +840,19 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
             // Original pixels still choose existing near/medium model detail.
             // Extended visibility admits distant geometry at its coarsest actual
             // authored LOD; it does not multiply every nearby high-detail mesh.
-            const float squaredXY=std::min(
-                hp2::sceneryNativeDistanceSquaredXY(instance,camera.eye),
-                hp2::sceneryNativeDistanceSquaredFootprintXY(
-                    storage.staticFineFootprints[index].data(),camera.eye));
-            // A source AABB has sometimes poorly fitting vertical extents. Use
-            // horizontal proximity, which is also the meaningful test for a
-            // player entering a canopy or passing roadside props. This is a
-            // squared native float test (no sqrt/console math per object).
-            const bool wasNear=viewId==1 && nearState[index]!=0;
-            const bool near=sceneryNativeNearDetailState(squaredXY,wasNear);
-            if(viewId==1)nearState[index]=static_cast<std::uint8_t>(near);
-            std::size_t lod=hp2::sceneryNativeSelectDetailLod(model,pixels,
-                near?0.0f:std::numeric_limits<float>::infinity());
+            std::size_t lod=sceneryNativeSelectDetailLod(model,pixels);
+            const bool canPromote=lod>0 && lod<3 && model.levels[0].solid;
+            // View1 retains the full hysteresis history. Other views need
+            // the distance test only when it could select the finer LOD.
+            if(viewId==1 || canPromote) {
+                const bool wasNear=viewId==1 && nearState[index]!=0;
+                const bool near=sceneryNativeNearDetailState(
+                    sceneryNativeDistanceSquaredXY(instance,camera.eye),wasNear) ||
+                    sceneryNativeNearDetailState(sceneryNativeDistanceSquaredFootprintXY(
+                        storage.staticFineFootprints[index].data(),camera.eye),wasNear);
+                if(viewId==1)nearState[index]=static_cast<std::uint8_t>(near);
+                if(near && canPromote)lod=0;
+            }
             const bool originalAdmission=pixels>=2 && lod<3;
             if(lod==3 && distanceScale>1.0f) {
                 for(std::size_t level=3;level>0;--level)
@@ -916,30 +1007,60 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
         }
         draws.resize(output);
     }
+    if(!emitGeometry) {
+        // Visibility and the near-LOD history above are sampled at each
+        // logical step, even when this step cannot be presented. Retain the
+        // model mutations in that same order. Lighting and packet capture
+        // have no consumer on a discarded step.
+        for(const auto& draw:draws) {
+            auto& model=*draw.model;
+            if(model.replacement || (model.solid && (model.solid->vertexAnimation ||
+                (model.solid->rigidAnimation && model.rigidAnimationStart))))
+                frame.RenderModel(model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,
+                    worldFrames,nullptr,nullptr,false);
+        }
+        return;
+    }
     // StuffScenery publishes in the exact leaf traversal order. Fully inside
     // entries set eModel flag4; intersecting entries use strip-level culling.
-    auto* resources=models_->resourceRegistry;
     std::optional<SceneLightContext> worldContext;
-    std::vector<std::size_t> lightJobs;
-    if(resources && draws.size()>=128 && NativeSceneEffectiveHardwareConcurrency()>1) {
-        for(std::size_t index=0;index<draws.size();++index) {
-            const auto& draw=draws[index];
-            if(!draw.identity && draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))
-                lightJobs.push_back(index);
-        }
-        if(lightJobs.size()>=128) {
-            preparedLights.resize(draws.size());
-            const auto applicationState=frame.ApplicationState();
-            const auto* environment=frame.EnvironmentMatrix();
-            RunNativeSceneJobs(lightJobs.size(),[&](std::size_t job) {
-                const auto index=lightJobs[job];
-                preparedLights[index]=SetupLightContext(resources->Lights(),draws[index].matrix.data(),
-                    environment,camera.eye,view,applicationState);
-            },128);
-        }
+    const auto cpus=NativeSceneEffectiveHardwareConcurrency();
+    const bool prepareInParallel=draws.size()>=128 && cpus>1;
+    if(prepareInParallel) {
+        if(stripVisibilityScratch_.size()<draws.size())stripVisibilityScratch_.resize(draws.size());
+        if(resources)preparedLights.resize(draws.size());
+        const auto state=frame.ApplicationState();
+        const auto* environment=frame.EnvironmentMatrix();
+        const auto jobs=std::min<std::size_t>(cpus*2u,(draws.size()+31u)/32u);
+        RunNativeSceneJobs(jobs,[&](std::size_t job) {
+            const auto first=draws.size()*job/jobs,last=draws.size()*(job+1)/jobs;
+            for(auto index=first;index<last;++index) {
+                const auto& draw=draws[index];
+                const auto& model=*draw.model;
+                const auto* solid=model.solid;
+                auto& prepared=stripVisibilityScratch_[index];
+                prepared.solid=nullptr;
+                // Animation and replacement tables can mutate live model
+                // state during submission. Keep their evaluation on the owner.
+                if(!solid || !solid->geometry || solid->vertexAnimation || solid->rigidAnimation || model.replacement)
+                    continue;
+                const int mode=draw.clip==2 ? 2:1;
+                ecstasyDetermineVisibleStrips(prepared.strips,model,view,draw.matrix.data(),false,mode);
+                prepared.solid=solid;
+                if(resources && !draw.identity && !prepared.strips.empty() && (solid->renderFlags&0x1c0u))
+                    preparedLights[index]=SetupLightContext(resources->Lights(),draw.matrix.data(),
+                        environment,camera.eye,view,state);
+            }
+        },2,cpus);
     }
-    for(std::size_t drawIndex=0;drawIndex<draws.size();++drawIndex) {
+    const auto captureDraw=[&](EcstasyFrame& target,std::size_t drawIndex) {
         auto& draw=draws[drawIndex];
+        const std::vector<EcstasyVisibleStrip>* prepared=nullptr;
+        if(prepareInParallel && stripVisibilityScratch_[drawIndex].solid &&
+            stripVisibilityScratch_[drawIndex].solid==draw.model->solid) {
+            prepared=&stripVisibilityScratch_[drawIndex].strips;
+            if(prepared->empty())return;
+        }
         std::optional<SceneLightContext> localContext;
         const SceneLightContext* context=nullptr;
         if(draw.identity || (draw.model->solid && (draw.model->solid->renderFlags&0x1c0u))) {
@@ -962,7 +1083,112 @@ void SceneryResources::Render(const CarCinematicScreen& view,EcstasyFrame& frame
                 }
             }
         }
-        frame.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context);
+        target.RenderModel(*draw.model,draw.matrix.data(),view,draw.clip==2 ? 4u:0u,1.0f,worldFrames,context,
+            nullptr,true,prepared);
+    };
+
+    for(std::size_t first=0;first<draws.size();) {
+        if(!prepareInParallel || !stripVisibilityScratch_[first].solid ||
+            stripVisibilityScratch_[first].solid!=draws[first].model->solid) {
+            captureDraw(frame,first++);
+            continue;
+        }
+        // A mutable model is an ordering boundary: its animation or paint
+        // table can change shared geometry that the following run will read.
+        auto last=first;
+        std::size_t stripCount=0;
+        bool needsWorldContext=false;
+        while(last<draws.size()) {
+            const auto& prepared=stripVisibilityScratch_[last];
+            if(!prepared.solid || prepared.solid!=draws[last].model->solid)break;
+            for(const auto& run:prepared.strips)stripCount+=run.count;
+            needsWorldContext|=draws[last].identity && !prepared.strips.empty();
+            ++last;
+        }
+        if(last-first<64 || stripCount<1024) {
+            while(first<last)captureDraw(frame,first++);
+            continue;
+        }
+        if(needsWorldContext && !worldContext) {
+            Require(resources,"Scenery light context lost its canonical resource registry");
+            worldContext=frame.SetupWorldLightContext(*resources,view);
+        }
+        EcstasyFrame::StaticTextureIndex textures;
+        std::unordered_set<const EditorMarkerSolidGeometry*> geometries;
+        for(auto index=first;index<last;++index) {
+            const auto& prepared=stripVisibilityScratch_[index];
+            if(prepared.strips.empty())continue;
+            const auto* geometry=&*prepared.solid->geometry;
+            if(!geometries.insert(geometry).second)continue;
+            for(const auto& binding:geometry->textures) {
+                const auto [entry,inserted]=textures.try_emplace(binding.texture,nullptr);
+                if(inserted)entry->second=textureInfoForDescriptor(binding.texture);
+            }
+        }
+        const auto workers=std::min<std::size_t>(cpus,(last-first+31u)/32u);
+        auto& scratch=frame.sceneryCaptureScratch_;
+        while(scratch.size()<workers)scratch.push_back(std::make_unique<EcstasyFrame>());
+        for(std::size_t index=0;index<workers;++index) {
+            auto& worker=*scratch[index];
+            worker.zWriteEnabled_=frame.zWriteEnabled_;
+            worker.dashboardProjection_=frame.dashboardProjection_;
+            worker.inGameMaterials_=frame.inGameMaterials_;
+            worker.environment_=frame.environment_;
+            worker.environmentUpdated_=frame.environmentUpdated_;
+            worker.environmentApplicationState_=frame.environmentApplicationState_;
+            worker.frontendEnvironmentTexture_=frame.frontendEnvironmentTexture_;
+            worker.specularFalloffTexture_=frame.specularFalloffTexture_;
+            worker.staticTextureIndex_=&textures;
+        }
+        const auto release=[&] {
+            for(std::size_t index=0;index<workers;++index) {
+                auto& worker=*scratch[index];
+                worker.Release();
+                worker.staticTextureIndex_=nullptr;
+                worker.environment_=nullptr;
+                worker.frontendEnvironmentTexture_=nullptr;
+                worker.specularFalloffTexture_=nullptr;
+                worker.nextAlphaGroup_=0;
+            }
+        };
+        try {
+            RunNativeSceneJobs(workers,[&](std::size_t job) {
+                const auto begin=first+(last-first)*job/workers;
+                const auto end=first+(last-first)*(job+1)/workers;
+                for(auto index=begin;index<end;++index)captureDraw(*scratch[job],index);
+            },2,static_cast<unsigned>(workers));
+            std::size_t produced=0;
+            for(std::size_t index=0;index<workers;++index)produced+=scratch[index]->commands_.size();
+            frame.commands_.reserve(frame.commands_.size()+produced);
+            for(std::size_t index=0;index<workers;++index) {
+                auto& worker=*scratch[index];
+                for(auto& command:worker.commands_) {
+                    if(command.alphaGroup)command.alphaGroup+=frame.nextAlphaGroup_;
+                    frame.commands_.push_back(std::move(command));
+                }
+                frame.nextAlphaGroup_+=worker.nextAlphaGroup_;
+            }
+        } catch(...) {release();throw;}
+        release();
+        first=last;
+    }
+    if(paused) {
+        // Replacement tables write shared material/UV state as a side effect
+        // of RenderModel. These views must still execute that source path.
+        const bool writesReplacement=std::any_of(draws.begin(),draws.end(),
+            [](const auto& draw){return draw.model->replacement!=nullptr;});
+        if(writesReplacement)paused->reset();
+        else {
+            if(!*paused)*paused=std::make_unique<PausedView>();
+            auto& cached=**paused;
+            cached.inputs=*pauseInputs;
+            cached.lightGroups=resources->Lights().Groups();
+            cached.commands.assign(frame.commands_.begin()+start,frame.commands_.end());
+            for(auto& command:cached.commands)if(command.alphaGroup)command.alphaGroup-=startAlphaGroup;
+            cached.alphaGroups=frame.nextAlphaGroup_-startAlphaGroup;
+            cached.zone=currentZoneNumber;
+            cached.statistics=nativeRenderStatistics_;
+        }
     }
     if(journalSample) {
         char detail[1536]{};

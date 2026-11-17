@@ -1,6 +1,7 @@
 #include "FMenus.hpp"
 #include "FEAnim.hpp"
 #include "Fred.hpp"
+#include "Flags.hpp"
 #include "Language.hpp"
 #include "bware/inc/bWare.hpp"
 #include <algorithm>
@@ -40,10 +41,17 @@ std::int32_t ValueChanger(std::int32_t value,std::int32_t delta,
     if(value<minimum)value=maximum;
     return value;
 }
+bool PlayerInputAvailable(const MainMenuScreenServices& s,std::int32_t port)
+{
+    if(s.pcHost)if(const auto* pc=s.pcHost->PcSettings()) {
+        return platform::NativeKeyboardEnabled(pc->input,port,true) ||
+            (platform::NativeGamepadEnabled(pc->input,port) && !s.pcHost->InputDeviceName(port).empty());
+    }
+    return joystickIsPluggedIn(s.screens->input->router,port)!=0;
+}
 bool BothControllers(const MainMenuScreenServices& s)
 {
-    return joystickIsPluggedIn(s.screens->input->router,0) &&
-        joystickIsPluggedIn(s.screens->input->router,1);
+    return PlayerInputAvailable(s,0) && PlayerInputAvailable(s,1);
 }
 bool MaybeChangeNumPlayers(const MainMenuScreenServices& s,FrontendChallengeSetup& data,
     std::int32_t desired)
@@ -51,7 +59,7 @@ bool MaybeChangeNumPlayers(const MainMenuScreenServices& s,FrontendChallengeSetu
     // PAL1B5C90 checks port1; MakeJoystickArrowsRight separately tests both.
     if(desired<=0)desired=2;
     else if(desired>=3)desired=1;
-    if(!joystickIsPluggedIn(s.screens->input->router,1))desired=1;
+    if(!PlayerInputAvailable(s,1))desired=1;
     const bool changed=desired!=data.playerCount;data.playerCount=desired;return changed;
 }
 float FirstItemX(MainMenuScreenServices& s,std::uint32_t screen)

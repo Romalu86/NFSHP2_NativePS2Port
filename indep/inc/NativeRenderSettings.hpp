@@ -8,6 +8,8 @@
 namespace hp2 {
 struct NativeRenderSettings {
     float drawDistanceScale{1.0f};       // World views: 1..4 times authored visibility.
+    bool maximumDetail{};
+    std::int32_t reflections{},brightness{},contrast{100},gamma{100};
     float mirrorDistanceScale{1.0f};     // Rear view only: 0.5..4 times authored visibility.
 };
 inline NativeRenderSettings validateNativeRenderSettings(NativeRenderSettings value) noexcept

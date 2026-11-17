@@ -88,6 +88,9 @@ TitleScreen::TitleScreen(FrontendStartupServices& services,std::uint32_t screen)
 {
     auto& menu=*services_.menus;auto& ui=*menu.ui;
     Require(ui.movie && services_.movieLog,"Title screen has no actual movie/replay owners");
+    // The startup profile page plays PANELMOVIE. Release its claim on the
+    // decoder before the title switches it to a 512x256 introduction.
+    menu.screens->StopMovie();
     ui.resources->SetObjectVisibility(TitleKey,TitleMovie,0);
     ui.resources->SetObjectVisibility(TitleKey,0x807d4c5cu,0);
     ui.resources->SetObjectVisibility(TitleKey,TitleAlternate,0);
@@ -95,8 +98,6 @@ TitleScreen::TitleScreen(FrontendStartupServices& services,std::uint32_t screen)
         phase=1;StartTitleMusic(menu);
     } else {
         phase=2;
-        bitmap=static_cast<FlailerBitmapChunk*>(ui.resources->FindObject(TitleKey,TitleMovie,2));
-        Require(bitmap,"Title screen is missing its actual authored movie bitmap");
         ui.movie->Close();OpenCurrentMovie();
         ui.resources->SetObjectVisibility(TitleKey,0x807d4c5cu,0);
     }
@@ -122,9 +123,11 @@ void TitleScreen::OpenCurrentMovie()
     auto& menu=*services_.menus;auto& ui=*menu.ui;
     const auto& movie=GetTitleMovieDescription(movieIndex,*ui.language,*menu.demoMode->demoDisc);
     ui.movie->InitFile(movie.filename);
-    if(auto* object=ui.resources->FindObject(TitleKey,movie.alternateBitmap?TitleAlternate:TitleMovie,2))
-        static_cast<FlailerBitmapChunk*>(object)->SetNativeFullscreenMovie(movie.alternateBitmap==0);
-    ui.resources->SetObjectVisibility(TitleKey,movie.alternateBitmap ? TitleAlternate : TitleMovie,1);
+    const auto target=movie.alternateBitmap?TitleAlternate:TitleMovie;
+    bitmap=static_cast<FlailerBitmapChunk*>(ui.resources->FindObject(TitleKey,target,2));
+    Require(bitmap,"Title screen is missing its actual authored movie bitmap");
+    bitmap->SetNativeFullscreenMovie(true);
+    ui.resources->SetObjectVisibility(TitleKey,target,1);
 }
 
 bool TitleScreen::CanAcceptInput() const
@@ -185,6 +188,18 @@ void TitleScreen::HandleTick()
         highlight_->Animate();
     }
     const auto noMovie=phase!=2;
+    const auto device=ui.resources->PromptDevice();
+    if(noMovie && device!=platform::NativePromptDevice::Original && ui.language) {
+        const auto language=static_cast<std::size_t>(std::clamp(ui.language->currentLanguage,0,5));
+        constexpr const char* keyboard[]{"PRESS ENTER","APPUYEZ SUR ENTREE","ENTER DRUECKEN",
+            "PREMI INVIO","PULSA INTRO","TRYCK ENTER"};
+        constexpr const char* gamepad[]{"PRESS START","APPUYEZ SUR START","START DRUECKEN",
+            "PREMI START","PULSA START","TRYCK START"};
+        const char* caption=device==platform::NativePromptDevice::Keyboard?keyboard[language]:gamepad[language];
+        auto* text=static_cast<FlailerTextChunk*>(ui.resources->FindObject(TitleKey,TitlePrompt,1));
+        if(text && (text->languageId || std::strcmp(text->text,caption)))
+            ui.resources->SetLocalizedText(TitleKey,TitlePrompt,caption);
+    }
     ui.resources->SetGroupVisibility(TitleKey,hashString("TITLE_IMAGE"),noMovie);
     if (noMovie && (!inputVisibleTicks || inputVisibleTicks==std::numeric_limits<std::int32_t>::max()))
         inputVisibleTicks=ui.clock->realTimer;
@@ -209,6 +224,13 @@ void BindFrontendStartup(FrontendStartupServices& services)
 void UnbindFrontendStartup()
 {
     titleOwner.reset();mumboOwner.reset();startupServices=nullptr;
+}
+
+bool CanUseFrontendPointer(const FlailerScreenList& screens) noexcept
+{
+    if(!screens.active || !screens.active->configuration)return false;
+    const auto* name=screens.active->configuration->name;
+    return std::strcmp(name,"BootAutoload")!=0 && (!titleOwner || titleOwner->phase!=2);
 }
 
 void TitleScreenCallback(ScreenMessage message,ScreenCallbackData* data)

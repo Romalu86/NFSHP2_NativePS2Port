@@ -206,7 +206,8 @@ void previewCometDispose(PreviewComet* comet)
     delete comet;
 }
 
-WorldServicesResult previewCometRender(PreviewComet* comet,float parameter,PreviewCometMesh* mesh)
+static WorldServicesResult renderPreviewComet(PreviewComet* comet,float parameter,
+    PreviewCometMesh* mesh,bool updateEmitters)
 {
     if (!comet || !comet->spline || !comet->parameters || !mesh)
         return WORLD_SERVICES_INVALID_BINDING;
@@ -260,7 +261,7 @@ WorldServicesResult previewCometRender(PreviewComet* comet,float parameter,Previ
         // Source+58 is the second start key's coordinate (0.8), not its
         // value0.95 at+5C. Emitter shutdown and alpha use the same cell.
         const float cutoff=parameters.startCurve.keys[1].coordinate;
-        if (sample==0) {
+        if (sample==0 && updateEmitters) {
             for (auto& emitter:comet->emitters) {
                 if (emitter.emissionState!=1)continue;
                 if (parameter<cutoff) {
@@ -307,6 +308,11 @@ WorldServicesResult previewCometRender(PreviewComet* comet,float parameter,Previ
     return WORLD_SERVICES_OK;
 }
 
+WorldServicesResult previewCometRender(PreviewComet* comet,float parameter,PreviewCometMesh* mesh)
+{
+    return renderPreviewComet(comet,parameter,mesh,true);
+}
+
 WorldServicesResult previewCometRenderFrame(PreviewComet* comet,float parameter,
     const CarCinematicScreen* screen,NativeEcstasyFrame* frame)
 {
@@ -315,7 +321,7 @@ WorldServicesResult previewCometRenderFrame(PreviewComet* comet,float parameter,
     // transform; each generated segment reaches Render3D at161F18.
     std::array<PreviewCometQuad,32> quads{};
     PreviewCometMesh mesh{quads.data(),quads.size(),0,nullptr};
-    const auto result=previewCometRender(comet,parameter,&mesh);
+    const auto result=renderPreviewComet(comet,parameter,&mesh,frame->AdvancesPresentation());
     if (result!=WORLD_SERVICES_OK)return result;
     const auto* texture=hp2::textureInfoForDescriptor(mesh.texture);
     if (!texture)return WORLD_SERVICES_INVALID_BINDING;

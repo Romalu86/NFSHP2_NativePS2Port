@@ -1,4 +1,5 @@
 #pragma once
+#include "CarDriver.hpp"
 
 #include "FlailerChunks.hpp"
 
@@ -90,6 +91,14 @@ public:
     FlailerScreenResource& ScreenAt(std::size_t index);
     // These searches preserve the original ordered package/screen cache.
     FlailerScreenResource* FindScreen(std::uint32_t key);
+    void CloneOptionsPage(std::uint32_t key,std::size_t rows);
+    FlailerTextChunk& CloneNativeText(std::uint32_t screen,const FlailerTextChunk& source,std::uint32_t key);
+    void AddNativeBackHints();
+    void CloneProfileKeyboard(std::uint32_t screen);
+    void AddNativeAudioMaster(std::uint32_t screen);
+    void AddNativeOptionSliders(std::uint32_t screen,std::size_t rows);
+    void SetPromptDevice(platform::NativePromptDevice device);
+    platform::NativePromptDevice PromptDevice() const noexcept;
     FlailerObjectChunk* FindObject(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t kind=0);
     void SetTextColor(std::uint32_t screenKey,std::uint32_t objectKey,std::uint32_t rgb);
     std::int32_t Printf(std::uint32_t screenKey,std::uint32_t objectKey,const char* format,...);
@@ -98,6 +107,8 @@ public:
     // Grow this field's native owner explicitly; ordinary SetString, wrapping
     // capacities, layout and debug fields keep their existing contracts.
     std::int32_t SetLocalizedText(std::uint32_t screenKey,std::uint32_t objectKey,const char* text);
+    void SetFittedText(std::uint32_t screenKey,std::uint32_t objectKey,const LanguageManager* language,
+        const char* text,std::uint32_t followingColumn=0);
     void SetObjectVisibility(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t value);
     void SetTopLeftPosition(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t x,std::int32_t y);
     void SetTopLeftX(std::uint32_t screenKey,std::uint32_t objectKey,std::int32_t x);

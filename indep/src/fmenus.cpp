@@ -7,6 +7,7 @@
 #include "Flags.hpp"
 #include "FEAnim.hpp"
 #include "GameFlow.hpp"
+#include "Language.hpp"
 #include "indep/src/MoviePlayer/MV3Codec.h"
 #include <cstdio>
 #include <cstring>
@@ -302,57 +303,99 @@ float FlailerSlider::DisplayToValue(float value) const
     return finiteRatio(value,displayScale);
 }
 
+float FlailerSlider::VolumeAtPointer(std::int32_t position) noexcept
+{
+    return std::round(static_cast<float>(std::clamp(position,0,10000))/500.0f)*VolumeStep;
+}
+
+FlailerSlider::FlailerSlider(FlailerUiState& state,std::uint32_t screen,std::uint32_t menuItem,
+    std::uint32_t bounds,std::uint32_t thumb,float initial)
+    : ui(&state),screenKey(screen),menuItemKey(menuItem),boundsObjectKey(bounds),
+      thumbObjectKey(thumb),minimumDisplay(0.0f),maximumDisplay(1.0f)
+{
+    auto* track=static_cast<FlailerBitmapChunk*>(state.resources->FindObject(screen,bounds,2));
+    Require(track,"Slider track is absent from its screen");
+    track->nativeSliderItem=menuItem;
+    tCubic1DInitialize(&position);
+    position.duration=0.25f;position.continuous=0;
+    ShowValue(initial,true);
+}
+
 FlailerSlider::FlailerSlider(FlailerUiState& state,std::uint32_t screen,std::uint32_t menuItem,
     std::uint32_t bounds,std::uint32_t thumb,std::int32_t audioChannel,
     float* value,float minimum,float maximum)
-    : ui(&state),screenKey(screen),menuItemKey(menuItem),boundsObjectKey(bounds),
-      thumbObjectKey(thumb),channel(audioChannel),setting(value),
-      minimumDisplay(minimum),maximumDisplay(maximum)
+    : FlailerSlider(state,screen,menuItem,bounds,thumb,0.0f)
 {
     Require(state.sound && state.sound->volumes && value,"Slider has no live sound settings/value owner");
     const auto& volumes=*state.sound->volumes;
     const float balance=sound::GetVolumeBalance(volumes);
-    const float maximumValue=sound::GetVolumeDefault(volumes,channel);
+    const float maximumValue=sound::GetVolumeDefault(volumes,audioChannel);
+    channel=audioChannel;setting=value;
+    minimumDisplay=minimum;maximumDisplay=maximum;
     displayScale=finiteRatio(balance,maximumValue);
-    tCubic1DInitialize(&position);
-    position.duration=0.25f;position.continuous=0;
-    position.desiredValue=ValueToDisplay(*setting);
-    position.value=position.desiredValue;
-    position.mode=0;position.derivative=position.desiredDerivative;
+    ShowValue(ValueToDisplay(*setting),true);
 }
 
 void FlailerSlider::StepValue(float step,bool updateMixer)
+{
+    Require(setting,"Slider step has no live value");
+    SetDisplayValue(ValueToDisplay(*setting+step),updateMixer);
+}
+
+void FlailerSlider::SetDisplayValue(float displayed,bool updateMixer,bool snap)
 {
     Require(ui && ui->sound && ui->sound->volumes && ui->sound->manager && setting,
         "Slider change has no actual mixer/sound-settings/value owner");
     auto& sound=*ui->sound;
     const auto& manager=*sound.manager;
-    float displayed=ValueToDisplay(*setting+step);
-    if (maximumDisplay<displayed) displayed=maximumDisplay;
-    if (displayed<minimumDisplay) displayed=minimumDisplay;
-    const float value=DisplayToValue(displayed);
-    const bool changed=!(value==*setting);
-    *setting=value;
-    if (updateMixer)
-        Require(worldAudioSetChannelVolume(sound.audio,&manager,channel,value)==WORLD_AUDIO_OK,
-            "Slider mixer update has no matching writable owner or backend command capacity");
-    sound::SaveVolumesForSpeech(sound);
-    if (changed) sound::PlayCommonRegionSample(sound,"MenuAdjustVolume",displayed);
+    displayed=std::clamp(displayed,minimumDisplay,maximumDisplay);
+    const auto value=DisplayToValue(displayed);
+    if(value!=*setting) {
+        if (updateMixer)
+            Require(worldAudioSetChannelVolume(sound.audio,&manager,channel,value)==WORLD_AUDIO_OK,
+                "Slider mixer update has no matching writable owner or backend command capacity");
+        *setting=value;
+        sound::SaveVolumesForSpeech(sound);
+        PlayChange(displayed);
+    }
+    ShowValue(displayed,snap);
+}
+
+void FlailerSlider::PlayChange(float gain)
+{
+    if(ui->sound)sound::PlayCommonRegionSample(*ui->sound,"MenuAdjustVolume",gain);
+}
+
+void FlailerSlider::ShowValue(float displayed,bool snap)
+{
+    displayed=std::clamp(displayed,minimumDisplay,maximumDisplay);
+    if(!snap && position.desiredValue==displayed)return;
     position.desiredValue=displayed;
-    if (!(displayed==position.value)) position.mode=2;
+    if(snap) {
+        position.value=displayed;position.mode=0;position.derivative=position.desiredDerivative;
+        PlaceThumb();
+    } else if (displayed!=position.value) position.mode=2;
 }
 
 void FlailerSlider::Animate()
 {
+    if(!position.mode)return;
     Require(ui && ui->clock && ui->resources,"Slider animation has no live clock/resource owner");
     tCubic1DUpdate(&position,ui->clock->realTimeElapsed,0.0f,0.0f);
+    PlaceThumb();
+}
+
+void FlailerSlider::PlaceThumb()
+{
     std::int32_t left=0,top=0,right=0,bottom=0;
     Require(ui->resources->GetBoundingBox(screenKey,boundsObjectKey,left,top,right,bottom,ui->language),
         "Slider bounds object is absent from its authored screen");
-    const auto rawWidth=static_cast<std::uint32_t>(right)-static_cast<std::uint32_t>(left);
-    std::int32_t width;std::memcpy(&width,&rawWidth,sizeof(width));
-    const float x=static_cast<float>(left)+position.value*static_cast<float>(width);
-    ui->resources->SetTopLeftX(screenKey,thumbObjectKey,convertFloatToInt32(x));
+    auto* thumb=static_cast<FlailerBitmapChunk*>(ui->resources->FindObject(screenKey,thumbObjectKey,2));
+    Require(thumb,"Slider has no thumb bitmap");
+    const auto width=ui->resources->ScaledBitmapWidth(*thumb);
+    const float x=static_cast<float>(left)+std::clamp(position.value,0.0f,1.0f)*
+        (static_cast<float>(right)-static_cast<float>(left));
+    thumb->SetTopLeftX(x-width*0.5f);
 }
 
 void FlailerUiState::SetIgnoreJoystick(std::int32_t ignored)
@@ -1071,6 +1114,7 @@ void FlailerScreenList::ChangeToScreen(const char* name,bool push)
     // PAL names are stable authored strings; keep the same lookup/order.
     const std::string destination=name ? name : "";
     if (name)name=destination.c_str();
+    sliderDragScreen=nullptr;sliderDragBar=0;
     auto* old=active;
     if (old) {
         old->SetVisibility(1);
@@ -1079,7 +1123,13 @@ void FlailerScreenList::ChangeToScreen(const char* name,bool push)
     }
     if (name) {
         if (auto* found=FindScreen(name)) {
-            active=found;found->SetVisibility(0);active->Activate();
+            active=found;found->SetVisibility(0);
+            if(ui->language) {
+                constexpr const char* back[]{"Back","Retour","Zurueck","Indietro","Atras","Tillbaka"};
+                ui->resources->SetLocalizedText(static_cast<std::uint32_t>(found->configuration->screenIds[0]),
+                    hashString("PC_BACK_TEXT"),back[std::clamp(ui->language->currentLanguage,0,5)]);
+            }
+            active->Activate();
             background->ChangeScreenHash(static_cast<std::uint32_t>(found->configuration->screenIds[0]));
         }
     } else background->ChangeScreenHash(0);
@@ -1104,6 +1154,114 @@ bool FlailerScreenList::MoveToPreviousScreen(std::int32_t count,bool consultCall
     Require(name,"Previous-screen transition has no valid stack entry");
     if (!*name) return false;
     ChangeToScreen(name,false);return true;
+}
+
+void FlailerScreenList::HandlePointer(float x,float y,bool pressed,std::int32_t wheel,bool held)
+{
+    if(!active || !ui || ui->ignoreJoystick)return;
+    if(help->IsActive()) {
+        if(pressed)JoyHandler(0,12,1);
+        return;
+    }
+    auto& resources=*ui->resources;
+    const auto bounds=[&](std::uint32_t screen,std::uint32_t key,int margin,bool requireVisible=true) {
+        int left{},top{},right{},bottom{};
+        const auto* object=resources.FindObject(screen,key);
+        return object && (!requireVisible || object->visible) &&
+            resources.GetBoundingBox(screen,key,left,top,right,bottom,ui->language) &&
+            x>=left-margin && x<=right+margin && y>=top-margin && y<=bottom+margin;
+    };
+    for(auto* popup:popups) {
+        if(!popup || !popup->activeState)continue;
+        auto& config=*popup->configuration;
+        const auto port=std::max(0,config.joystickPort);
+        for(int index=0;index<config.buttonCount;++index) {
+            if(!bounds(config.screenKey,popup->buttons[index]->objectKey,12))continue;
+            if(popup->selectedIndex!=index) {
+                popup->UnHighlightCurrentMenuItem();
+                popup->selectedIndex=index;
+                popup->HighlightCurrentMenuItem();
+            }
+            if(pressed)popup->JoyHandler(port,9,1);
+            break;
+        }
+        return;
+    }
+    auto* screen=active->screen;
+    if(!screen)return;
+    const auto key=static_cast<std::uint32_t>(screen->screenId);
+    const auto port=std::max(0,screen->joystickPort);
+    if(pressed || sliderDragScreen!=active) {sliderDragScreen=nullptr;sliderDragBar=0;}
+    if(auto* menu=screen->menu;menu && active->configuration && active->configuration->callback && (!wheel || pressed || sliderDragBar)) {
+        const auto slide=[&](const FlailerBitmapChunk& track) {
+            auto* item=menu->FindItem(track.nativeSliderItem);
+            if(!track.visible || !item || (item->flags&1u)==0 || !item->object || !item->object->visible)return false;
+            if(!sliderDragBar && (!bounds(key,track.key,5) ||
+                (track.clipObjectKey && !bounds(key,track.clipObjectKey,0,false))))return false;
+            int left{},top{},right{},bottom{};
+            if(!resources.GetBoundingBox(key,track.key,left,top,right,bottom,ui->language) || right<=left)return false;
+            const auto fraction=std::clamp((x-left)/static_cast<float>(right-left),0.0f,1.0f);
+            const auto callback=active->configuration->callback;
+            auto* const source=active;
+            const auto row=track.nativeSliderItem;
+            const auto bar=track.key;
+            menu->SetActiveMenuItem(row);
+            if(active!=source)return true;
+            if(!pressed && !sliderDragBar)return true;
+            sliderDragScreen=held?active:nullptr;sliderDragBar=held?bar:0;
+            ScreenCallbackData data{row,port,static_cast<int>(std::lround(fraction*10000.0f)),0};
+            callback(held?ScreenMessage::SliderDrag:ScreenMessage::SliderCommit,&data);
+            return true;
+        };
+        if(sliderDragBar) {
+            auto* track=static_cast<FlailerBitmapChunk*>(resources.FindObject(key,sliderDragBar,2));
+            if(track && track->nativeSliderItem && slide(*track))return;
+            sliderDragScreen=nullptr;sliderDragBar=0;
+        } else if(auto* page=resources.FindScreen(key)) {
+            for(auto* object=page->objects.next;object!=&page->objects;object=object->next) {
+                if(object->kind!=2 || !object->visible)continue;
+                const auto& track=*static_cast<const FlailerBitmapChunk*>(object);
+                if(track.nativeSliderItem && slide(track))return;
+            }
+        }
+    }
+    if(active->configuration && active->configuration->callback) {
+        ScreenCallbackData pointer{static_cast<std::uint32_t>(x),port,static_cast<int>(y),pressed?1:0};
+        active->configuration->callback(ScreenMessage::Pointer,&pointer);
+        if(pointer.key==0xffffffffu)return;
+    }
+    if(pressed) {
+        if(bounds(key,hashString("PC_BACK_TEXT"),7) || bounds(key,hashString("PC_BACK_ICON"),4)) {JoyHandler(port,11,1);return;}
+        if(bounds(key,hashString("PC_DEL_TEXT"),7) || bounds(key,hashString("PC_DEL_ICON"),4)) {JoyHandler(port,17,1);return;}
+        if(bounds(key,0xd1cda594u,9)) {JoyHandler(port,5,1);return;}
+        if(bounds(key,0x9345e4a7u,9)) {JoyHandler(port,6,1);return;}
+        // Several authored footer objects share a hash. The Help caption
+        // is identified by the language ID used throughout FRONTB.
+        if(auto* page=resources.FindScreen(key)) {
+            for(auto* item=page->objects.next;item!=&page->objects;item=item->next)
+                if(item->kind==1 && item->visible && static_cast<FlailerTextChunk*>(item)->languageId==12000 &&
+                    x>=item->topLeftX-28 && x<=item->topLeftX+72 &&
+                    y>=item->topLeftY-8 && y<=item->topLeftY+28) {JoyHandler(port,12,1);return;}
+        }
+    }
+    if(wheel) {JoyHandler(port,wheel>0?3:4,1);return;}
+    auto* menu=screen->menu;
+    FlailerMenuItem* selected=nullptr;
+    float distance=35.0f;
+    if(menu)for(auto* item=menu->root.next;item!=&menu->root;item=item->next) {
+        const auto* object=item->object;
+        if(!(item->flags&1u) || !object || !object->visible)continue;
+        int left{},top{},right{},bottom{};
+        if(!resources.GetBoundingBox(key,item->objectKey,left,top,right,bottom,ui->language))continue;
+        if(object->clipObjectKey && !bounds(key,object->clipObjectKey,0,false))continue;
+        const float candidate=std::abs(y-static_cast<float>(top+bottom)*0.5f);
+        if(x>=left-12 && x<=std::max(608,right+12) && candidate<distance &&
+            y>=top-5 && y<=bottom+5) {distance=candidate;selected=item;}
+    }
+    if(selected) {
+        menu->SetActiveMenuItem(selected->objectKey);
+        if(pressed)JoyHandler(port,9,1);
+    } else if(pressed && (!menu || !menu->current))JoyHandler(port,9,1);
 }
 
 void FlailerScreenList::AddNormalMenuJoyHandlers()

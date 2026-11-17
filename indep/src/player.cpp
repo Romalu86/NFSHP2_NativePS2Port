@@ -807,7 +807,18 @@ void carFramePlayerAdvance(CarFramePlayerState* player)
                 float ratio = 1.0f;
                 if (pose && (group->laneFlags[lane] & 3u)) {
                     const float authoredSpeed = (float)pose->laneSpeeds[lane];
-                    ratio = finiteRatio(movement->bindings.state->forwardSpeed, authoredSpeed);
+                    // PAL180DA8 samples the speed magnitude, including in a slide or reverse.
+                    const float speed = movement->bindings.state->speed;
+                    // Native guard on the retail road-speed sample. A zero
+                    // speed in authored recovery data is not a denominator:
+                    // finiteRatio(x,0) returns FLT_MAX and poisons both the
+                    // rolling history and the race-long maximum. The AI then
+                    // multiplies its full physical performance by that value.
+                    // Preserve the PAL division for every valid road sample.
+                    if (authoredSpeed > 0.0f && std::isfinite(speed)) {
+                        const float sampled = speed / authoredSpeed;
+                        if (std::isfinite(sampled)) ratio = sampled;
+                    }
                 }
                 driverHistoryPush(&player->speedHistory, ratio);
                 player->maximumSpeedRatio = maximumFinite(
@@ -2099,11 +2110,15 @@ float PlayerGaugeAngle(float first,float last,float fraction)
     return angle;
 }
 
-void PlayerFormatTime(CarPlayerOwnedState& own,hp2::frontend::FlailerTextChunk* text,int32_t ticks,int32_t flags=0)
+void PlayerFormatTime(CarPlayerOwnedState& own,hp2::frontend::FlailerTextChunk* text,int32_t ticks,
+    int32_t flags=0,bool compact=false)
 {
     if (!text)return;
     char buffer[GAME_TIMER_TEXT_CAPACITY];
     gameTimerPrintToString(&ticks,buffer,flags,&own.bindings.language->currentLanguage);
+    // The center HUD uses proportional glyphs. Fixed-column PAL padding
+    // would separate the sign and shift the visible value off center.
+    if(compact)*std::remove(buffer,buffer+std::strlen(buffer),' ')='\0';
     text->SetString(buffer);
 }
 
@@ -2299,7 +2314,8 @@ void carFramePlayerRenderHud(CarFramePlayerState* player)
         const int32_t stamp=entry->checkpointTicks[checkpoint],time=entry->segmentTicks[checkpoint];
         const float seconds=static_cast<float>(clock.worldTimer-stamp)*0.0002500000118743628f;
         if (PlayerTimerActive(stamp) && seconds<5.0f && PlayerTimerActive(time)) {
-            showTime=true;PlayerFormatTime(own,own.wrongWayText[0],time);own.wrongWayText[0]->fontKey=hashString("FONT_A");
+            showTime=true;PlayerFormatTime(own,own.wrongWayText[0],time,0,true);
+            own.wrongWayText[0]->fontKey=hashString("FONT_A");
             bool comparable=false;int32_t split=0;
             switch (player->settings.splitTimeMode) {
             case 0: {
@@ -2322,7 +2338,7 @@ void carFramePlayerRenderHud(CarFramePlayerState* player)
                 const bool update=(!own.wrongWayText[1]->visible || (playerLiveUpdateSplitTimeRate &&
                     clock.worldLoopCounter%playerLiveUpdateSplitTimeRate==0)) &&
                     (playerLiveUpdateSplitTimeRate || seconds<0.20000000298023224f);
-                if (update)PlayerFormatTime(own,own.wrongWayText[1],split,2);
+                if (update)PlayerFormatTime(own,own.wrongWayText[1],split,2,true);
             }
         }
         PlayerVisible(own.wrongWayText[0],showTime);PlayerVisible(own.wrongWayText[1],showSplit);
@@ -2341,15 +2357,28 @@ void carFramePlayerRenderHud(CarFramePlayerState* player)
             const auto* selection=current->car->driverInfo;
             hp2::Require(selection && own.bindings.cars,"Leaderboard has no original CarInfo selection");
             const auto* skin=own.bindings.cars->FindSkin(selection->appearance.modelCode,selection->appearance.skinNumber,true);
-            hp2::Require(skin,"Leaderboard authored skin is absent");own.liveSwatch[row]->SetColor(skin->authoredWord30);
+            hp2::Require(skin,"Leaderboard authored skin is absent");
+            auto& swatch=*own.liveSwatch[row];
+            if (swatch.textureKey!=skin->colorSwatchTextureKey) {
+                // PAL17FE68 passes SkinInfo+30 to ChangeTexture. The PAL
+                // lookup fallback also covers playable PC traffic whose
+                // Metal skin references an absent swatch.
+                auto* resources=ui.Models().resourceRegistry;
+                const auto* texture=resources ? resources->ResolveTexture(skin->colorSwatchTextureKey,true)
+                    : ui.FindTexture(skin->colorSwatchTextureKey);
+                if (texture && swatch.textureKey!=texture->key)swatch.ChangeTexture(texture);
+            }
             auto* text=own.liveStatus[row];const bool started=PlayerTimerActive(current->checkpointTicks[race.previousCheckpoint]);
             if (clock.worldTimeFrames%500<100 || !started) {
                 if ((clock.worldTimeFrames/500)&1)text->SetString(own.bindings.cars->Car(static_cast<size_t>(selection->appearance.modelCode)).GetShortName(*own.bindings.language));
-                else text->SetString(current==entry?player->settings.playerName:hp2::RaceDriverName(*selection));
+                else ui.SetLocalizedText(own.hudScreen,text->key,current==entry?player->settings.playerName:hp2::RaceDriverName(*selection));
                 text->ClearFormatOptions(64);
             } else if (current->completionReason) {
                 text->SetLanguageID(static_cast<uint32_t>(raceFinishReasonLanguageId(current->completionReason)));text->ClearFormatOptions(64);
-            } else if (current==entry) {text->SetString(player->settings.playerName);text->ClearFormatOptions(64);}
+            } else if (current==entry) {
+                ui.SetLocalizedText(own.hudScreen,text->key,player->settings.playerName);
+                text->ClearFormatOptions(64);
+            }
             else if (registry.services->pursuit && current->car->tableIndex<8 &&
                 registry.services->pursuit->participantReset[current->car->tableIndex].resetPending) {
                 text->SetLanguageID(0x49446u);text->ClearFormatOptions(64);
@@ -2494,7 +2523,7 @@ void carFramePlayerDrawTracker(CarFramePlayerState* player,const Car* car,int32_
 }
 
 // Final178C90 retains one actual display-settings cell and the existing map.
-void carFramePlayerSetTrackMapMode(CarFramePlayerState* player,int32_t mode)
+void carFramePlayerSetTrackMapMode(CarFramePlayerState* player,int32_t mode,bool preview)
 {
     hp2::Require(player && player->ownedState && player->registry && player->registry->clock,
         "TrackMap mode has no owning Player");
@@ -2508,7 +2537,10 @@ void carFramePlayerSetTrackMapMode(CarFramePlayerState* player,int32_t mode)
         if (player->movement.seat>0)mode=6;
     } else {stored=&display.singleViewTrackMapMode;allowed=singlePlayerTrackMapModes;count=6;}
     if (std::find(allowed,allowed+count,mode)==allowed+count)mode=allowed[0];
-    if (*stored!=mode) {*stored=static_cast<int8_t>(mode);own.trackMapChangedTicks=player->registry->clock->realTimeFrames;}
+    const bool changed=*stored!=mode;
+    if (changed)*stored=static_cast<int8_t>(mode);
+    if (changed || preview)
+        own.trackMapChangedTicks=mode==6?0:player->registry->clock->realTimeFrames;
     if (own.trackMap)own.trackMap->SetMode(mode);
 }
 // PAL181C08, the original Player wrapper has no independent map state.
@@ -3327,7 +3359,7 @@ int32_t carFramePlayerSetHudFeatures(CarFramePlayerState* player,uint32_t reques
     if (changed&1u) {
         if (requested&1u) {
             own.trackMap=std::make_unique<hp2::TrackMap>(own.bindings.track,player->car,player,ui,
-                *own.bindings.renderManager,*player->cameras->context->services,own.overlayViewNumber,
+                *own.bindings.renderManager,*player->cameras->context->services,own.viewNumber,
                 parameters);
             const auto& display=parameters.runtimeSettings->display;
             int32_t mode=parameters.specialPursuit?display.pursuitTrackMapMode:

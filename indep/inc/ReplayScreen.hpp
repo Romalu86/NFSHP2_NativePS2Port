@@ -30,6 +30,7 @@ public:
     // reports a physical audio error during an exceptional parent teardown.
     void Close();
     void Tick();
+    void HandlePointer(float x,float y,bool pressed,bool held);
     void Update();
     void ChangeCameraMover();
     void CalculateTimelineMarkers(bool visible);
@@ -64,6 +65,7 @@ private:
     float startSeconds_{},endSeconds_{};
     std::int32_t timelineLeft_{10},timelineWidth_{100};
     std::int32_t hidden_{},cameraSelection_{},lastJoyLoop_{},stoppedAtTicks_{};
+    std::int32_t pointerSeekEvent_{},lastPointerSeekTicks_{};
     std::array<TimelineMarker,16> markers_{};
     std::array<TimelineMarker,16> segments_{};
     std::size_t markerCount_{},segmentCount_{};

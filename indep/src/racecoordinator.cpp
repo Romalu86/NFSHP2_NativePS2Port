@@ -479,6 +479,12 @@ bool raceCoordinatorHasEndGameScreens(const GameSession& session) noexcept
     return session.ownedState && session.ownedState->endScreens!=nullptr;
 }
 
+void raceCoordinatorReplayPointer(GameSession& session,float x,float y,bool click,bool held)
+{
+    if(session.ownedState && session.ownedState->replayScreen)
+        session.ownedState->replayScreen->HandlePointer(x,y,click,held);
+}
+
 void raceCoordinatorUpdateReplayScreen(GameSession& session)
 {
     if (session.ownedState && session.ownedState->replayScreen)

@@ -169,16 +169,23 @@ NativeProcessLaunch resolveNativeProcessLaunch(const std::filesystem::path& exec
 // Launcher preferences are a PC adapter. This file is separate from the
 // original config.bin replay cells and from earned FRED progress.
 enum class NativeTextureFilter {Authored,Bilinear,Trilinear,Anisotropic};
-enum class NativeAntialiasing {Off,Fxaa,Msaa2,Msaa4,Msaa8};
+enum class NativeAntialiasing {Off,Fxaa,Msaa2,Msaa4,Msaa8,SmaaHigh,SmaaUltra};
 struct NativeGameplayOptions {
     bool racerNitro{},trafficVehicles{},disableCatchUp{},cockpitView{};
+    bool restoreCutTraffic{},randomNfsEditionOpponents{};
 };
 extern NativeGameplayOptions applicationNativeGameplay;
 struct NativePcSettings {
     std::int32_t width{1280},height{720};
     bool fullscreen{},vsync{true};
+    std::pair<int,int> fullscreenSize{}; // Zero selects the monitor's desktop mode.
     std::string monitorDevice;
+    std::string videoAdapter;
     std::int32_t frameLimit{}; // Zero leaves native presentation uncapped.
+    std::int32_t renderScale{}; // Zero uses the window's native pixel extent.
+    bool sharpScaling{};
+    std::pair<int,int> raceAspect{}; // Zero uses the display's aspect ratio.
+    std::int32_t masterVolume{100};
     NativeTextureFilter textureFilter{NativeTextureFilter::Trilinear};
     NativeAntialiasing antialiasing{NativeAntialiasing::Off};
     std::int32_t anisotropy{16};
@@ -189,7 +196,12 @@ struct NativePcSettings {
     bool showFps{true};
 };
 void validateNativePcSettings(const NativePcSettings& settings);
+std::pair<int,int> nativeFitAspect(std::pair<int,int> extent,std::pair<int,int> ratio) noexcept;
+std::vector<std::pair<int,int>> nativeAspectChoices(const std::vector<std::pair<int,int>>& modes);
+inline constexpr char NativeSettingsFilename[]="settings.ini";
+inline constexpr char NativeTrackOverrideFilename[]="track-override.ini";
 NativePcSettings loadNativePcSettings(const std::filesystem::path& file);
+void saveNativeInputSettings(const std::filesystem::path& file,const platform::NativeInputSettings& settings);
 void saveNativePcSettings(const std::filesystem::path& file,const NativePcSettings& settings);
 void applyNativeProcessOverrides(NativePcSettings& settings,const NativeProcessLaunch& launch);
 // Readable PC transport for the original four-byte track-selection input.
@@ -214,6 +226,8 @@ private:
 // window. Only distinct accepted presents enter the numerator; offscreen
 // submissions and failed/out-of-date presents cannot manufacture display FPS.
 // Frame ms is elapsed/present count from the same window, not CPU+GPU time.
+std::array<char,48> nativeFrameRateCaption() noexcept;
+
 class NativeFrameTiming final {
 public:
     using Clock=std::chrono::steady_clock;
@@ -244,7 +258,7 @@ private:
     bool initialized_{};
 };
 // Optional PC presentation limit. It never changes logical-update deadlines.
-// Each actual submission starts a new interval; overdue frames are not burst.
+// Keep the original cadence through short delays and skip missed intervals.
 class NativePresentationClock final {
 public:
     using Clock=std::chrono::steady_clock;
@@ -265,6 +279,7 @@ private:
 #ifdef _WIN32
 int runNativeWindowsApplication(int argc,const wchar_t* const* argv);
 #endif
+enum class NativeMenuTextKey : char { Left=1,Right,Home,End,Delete };
 class NativeApplicationHost {
 public:
     virtual ~NativeApplicationHost()=default;
@@ -292,6 +307,28 @@ public:
     // Physical events are sampled once at the logical step's deadline. Extra
     // presentations never consume input or advance held-button repeat timers.
     virtual void BeginInputStep(NativeFrameTiming::Clock::time_point) {}
+    virtual void SetMenuInput(bool,bool,bool) noexcept {}
+    virtual bool ReadMenuPointer(float&,float&,bool&,int&) noexcept {return false;}
+    virtual void SetMenuPointer(bool) noexcept {}
+    virtual void SetReplayInput(bool) noexcept {}
+    virtual bool MenuPointerHeld() const noexcept {return false;}
+    virtual std::pair<int,int> MenuMonitorSize() const noexcept {return {16384,16384};}
+    virtual std::vector<std::pair<int,int>> MenuDisplayModes() const {return {};}
+    virtual void SetRacePresentation(bool) {}
+    virtual platform::NativePromptDevice PromptDevice() const noexcept {return platform::NativePromptDevice::Original;}
+    virtual platform::NativePromptDevice GamepadPromptDevice(std::int32_t) const noexcept
+    {return platform::NativePromptDevice::Original;}
+    virtual bool HasDualSense(std::int32_t) const noexcept {return false;}
+    virtual void SetDrivingTriggers(std::int32_t,std::uint32_t,std::uint32_t) noexcept {}
+    virtual const NativePcSettings* PcSettings() const noexcept {return nullptr;}
+    virtual bool SavePcSettings(const NativePcSettings&,std::string&) {return false;}
+    virtual void PreviewDualSenseVolume(std::int32_t,std::optional<std::int32_t>) noexcept {}
+    virtual void PreviewMasterVolume(std::optional<std::int32_t>) noexcept {}
+    virtual std::string InputDeviceName(std::int32_t) const {return {};}
+    virtual void BeginBindingCapture(std::int32_t) noexcept {}
+    virtual std::uint16_t CapturedKey() const noexcept {return 0;}
+    virtual void SetMenuTextInput(bool) noexcept {}
+    virtual std::string TakeMenuTextInput() {return {};}
     virtual int32_t ReadInput(int32_t port,JoystickControls& destination)=0;
     virtual void SetRumble(int32_t port,uint8_t small,uint8_t large)=0;
     virtual void SubmitFrame(EcstasyFrame& frame)=0;

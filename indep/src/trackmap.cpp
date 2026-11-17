@@ -5,8 +5,6 @@
 #include "indep/inc/Race.hpp"
 #include "indep/inc/eMath.hpp"
 #include "indep/inc/CameraMover.hpp"
-#include "indep/inc/Race.hpp"
-#include "bware/inc/bWare.hpp"
 #include "bware/inc/bWare.hpp"
 #include "bware/inc/bMath.hpp"
 #include <algorithm>
@@ -65,6 +63,13 @@ bool MarkerVisible(const CarMovement* car)
     Require(car && car->bindings.ownerMotion && car->bindings.state,"TrackMap has no actual car state");
     return car->bindings.ownerMotion->actionEnabled && car->bindings.ownerMotion->transitionCounter;
 }
+
+EcstasyUiPlacement mapPlacement(const TrackMapModeInfo& mode)
+{
+    // The full-map modes in the PAL table use the center screen anchor.
+    return mode.screenX==320 ? EcstasyUiPlacement::CenteredCanvas : EcstasyUiPlacement::HudLeft;
+}
+
 }
 
 const std::array<TrackMapModeInfo,11>& TrackMap::Modes(){return modes;}
@@ -76,10 +81,10 @@ void TrackMap::SetMode(std::int32_t mode)
 }
 TrackMap::TrackMap(const TrackResourceInfo* track,CarMovement* car,CarFramePlayerState* player,
     frontend::FlailerResources& resources,frontend::FlailerRenderManager& renderer,
-    CarCinematicServices& cameras,std::int32_t overlayViewNumber,
+    CarCinematicServices& cameras,std::int32_t viewNumber,
     const RaceParameters& parameters)
     :track_(track),car_(car),player_(player),resources_(resources),renderer_(renderer),
-    cameras_(cameras),parameters_(parameters),overlayViewNumber_(overlayViewNumber)
+    cameras_(cameras),parameters_(parameters),viewNumber_(viewNumber)
 {
     valid_=track_ && car_ && player_;
     if (!valid_)return;
@@ -136,8 +141,9 @@ void TrackMap::EvalCubic(float& position,float& velocity,float target,float elap
 }
 bool TrackMap::GetCameraDirection(std::array<float,4>& direction)
 {
-    auto* screen=ecstasyViewAt(&cameras_,overlayViewNumber_);
-    Require(screen,"TrackMap camera screen is absent");
+    // PAL 1BD0D0 reads Player's driving view, also used by the Ecstasy camera list.
+    auto* screen=ecstasyViewAt(&cameras_,viewNumber_);
+    Require(screen,"TrackMap driving view is absent");
     auto* camera=screen->first;
     if (!camera || camera->kind!=1) {
         const auto* race=player_->registry->services->race;
@@ -190,8 +196,9 @@ void TrackMap::DrawOverOrUnderLay(const EditorMarkerTexture* texture,std::int32_
     polygon.vertices[3].position={mode.clipX-halfWidth,mode.clipY+halfHeight,static_cast<float>(depth),0};
     if (!mode.mapEnabled)return;
     polygon.rasterState[2]=1;
-    renderer_.SubmitPolygon(resources_.StripPool(),texture,polygon,depth);
+    renderer_.SubmitPolygon(resources_.StripPool(),texture,polygon,depth,mapPlacement(mode));
 }
+
 void TrackMap::DrawMap(TrackMapPoint& center,TrackMapQuad& bounds,std::uint16_t angle)
 {
     const auto& mode=CurrentMode();if (!mode.mapEnabled)return;
@@ -301,7 +308,7 @@ void TrackMap::ClipPolygon(const frontend::FlailerPoly& polygon,const EditorMark
             rendered.vertices[corner].color=(rendered.vertices[corner].color&0xff000000u)|
                 (polygon.vertices[corner].color&0x00ffffffu);
         }
-        renderer_.SubmitPolygon(resources_.StripPool(),texture,rendered,depth);first=last;
+        renderer_.SubmitPolygon(resources_.StripPool(),texture,rendered,depth,mapPlacement(mode));first=last;
     }
 }
 void TrackMap::Render()
@@ -312,6 +319,7 @@ void TrackMap::Render()
     auto* race=services?services->race:nullptr;
     if (!valid_)return;
     Require(world && race,"TrackMap render has no actual World/Race owners");
+    const bool followedCamera=CurrentMode().followCamera;
     target_=nullptr;activeMode_=configuredMode_;
     auto* pursuit=services->pursuit;
     if (configuredMode_!=6 && pursuit) {
@@ -320,6 +328,12 @@ void TrackMap::Render()
             target_=selected->group->target;activeMode_=10;
         }
     }
+    if (CurrentMode().followCamera && !followedCamera) {
+        // Resume smoothing at the current simulation tick after a fixed view.
+        velocity_={};
+        timestamp_=registry->clock->worldTimer;
+    }
+    if (!CurrentMode().mapEnabled)return;
     std::uint16_t angle{};if (!GetAngle(angle))return;
     DrawOverOrUnderLay(background_,15);
     TrackMapPoint center{};TrackMapQuad bounds{};DrawMap(center,bounds,angle);

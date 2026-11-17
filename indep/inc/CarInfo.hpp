@@ -56,6 +56,11 @@ struct EditorMarkerTexture;
 struct CarViewMoverRegistry;
 
 namespace hp2 {
+constexpr bool IsRestoredTrafficModel(std::int32_t modelCode) noexcept
+{
+    return modelCode==52 || modelCode==59 || modelCode==63;
+}
+
 namespace frontend {
 class LanguageManager;
 // The proven original header definition is provided out of line in its
@@ -178,7 +183,7 @@ struct CarSkin {
     std::string displayName;
     std::uint32_t selectionMask = 0;
     std::uint32_t lightMaterialKey{}; // final SkinInfo+2C, not a texture
-    std::uint32_t authoredWord30{};
+    std::uint32_t colorSwatchTextureKey{}; // PAL SkinInfo+30
 };
 
 struct CarSkinChoices {
@@ -232,7 +237,8 @@ public:
     std::int32_t RandomSkin(std::size_t modelCode, bool alternatePursuitSkin) const;
     bool WeightedPickRide(CarAppearanceSelection& output, std::int32_t bodyCategory,
         std::int32_t routeVehicleClass, const RaceParameters& parameters,
-        const frontend::LanguageManager& language) const;
+        const frontend::LanguageManager& language, bool allowNfsEdition=false,
+        bool allowCutTraffic=false) const;
     CarLanguageInfo* FindCarLanguageInfo(std::int32_t modelCode);
     void InitCarInfo();
 
@@ -481,6 +487,8 @@ std::size_t carRenderScene(Car& car,const CarCinematicScreen& view,hp2::EcstasyF
 void RenderCars(World& world,const CarCinematicScreen& view,hp2::EcstasyFrame& frame,
     const GameTime& clock,std::int32_t presentationLayout,
     const hp2::CarDamageDisplayBindings* damageDisplay,CarViewMoverRegistry* views);
+void RenderCarsForViews(World& world,CarCinematicServices& cameras,hp2::EcstasyFrame& frame,
+    const GameTime& clock,const hp2::CarDamageDisplayBindings& display,CarViewMoverRegistry* views);
 // PAL1242A8/123570: the attached camera's authored DASHGEOM pass, after
 // rear-view composition and before fog. Geometry retains its loaded owner.
 std::size_t RenderDashboards(const CarCinematicScreen& view,hp2::EcstasyFrame& frame,

@@ -104,6 +104,7 @@ void ResetCurrentMenus(MainMenuScreenServices& s)
 }
 void ControllerPicture(MainMenuScreenServices& s,std::uint32_t screen,std::int32_t configuration)
 {
+    if(configuration>=JOYSTICK_LAYOUT_E && configuration<=JOYSTICK_LAYOUT_H)configuration=30;
     std::array<char,32> name{};std::snprintf(name.data(),name.size(),"CONTROLLER%d",configuration);
     if(auto* image=Bitmap(s,screen,0x0b2ad6dfu))image->ChangeTexture(hashString(name.data()));
 }
@@ -113,7 +114,8 @@ class JoystickConfigScreen final {
 public:
     JoystickConfigScreen(MainMenuScreenServices& services,std::int32_t port,std::uint32_t screen)
         :s_(services),port_(port),displayed_(joystickGetUserConfiguration(&Input(s_),port)),
-         saved_(displayed_),type_(joystickGetType(&Input(s_),port)),screen_(screen),
+         saved_(services.frontend->joystickConfigurations[port>0?1u:0u]),
+         type_(joystickGetType(&Input(s_),port)),screen_(screen),
          plugged_(joystickIsPluggedIn(&Input(s_),port)!=0),
          left_(Bitmap(s_,screen_,0xd1cda594u)),right_(Bitmap(s_,screen_,0x9345e4a7u))
     {
@@ -242,7 +244,14 @@ void JoystickConfigScreen::DrawScreen()
         {{0x1bf89b53,0x1d4c7}},{{0xecd38543,0x1d4c6}},{{0x4c040295,0x1d8a9}},{{0x15524647,0x1d4c5}}}};
     for(const auto& item:labels)resources.SetLanguageID(screen_,item[0],item[1]);
     if(!joystickIsPluggedIn(&Input(s_),port_))return;
+    const auto device=s_.pcHost?s_.pcHost->GamepadPromptDevice(port_):platform::NativePromptDevice::Original;
     const auto print=[&](std::uint32_t key,std::uint32_t character) {
+        if(auto* label=static_cast<FlailerTextChunk*>(resources.FindObject(screen_,key,1));
+            label && (!label->nativePhysicalButtonLabel || label->nativePhysicalButtonDevice!=device)) {
+            label->nativePhysicalButtonLabel=true;
+            label->nativePhysicalButtonDevice=device;
+            label->DeleteFlailerStrip();
+        }
         resources.Printf(screen_,key,"%c",static_cast<int>(character));
     };
     const auto secondary=[&](std::uint32_t key,std::uint32_t label,std::uint32_t character) {

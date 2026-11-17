@@ -88,7 +88,8 @@ PauseDisplayOpts::PauseDisplayOpts(RaceScreenServices& services,std::uint32_t sc
         auto* player=services.players->playersByNumber[index];
         if (player && player->movement.controllerPort==port) {
             player_=player;
-            PauseUi(services).resources->SetLanguageID(screen,0x18B2DBC8u,index?0x334B6u:0x334B5u);
+            const auto title=services.players->count==1 ? 210901u : (index?0x334B6u:0x334B5u);
+            PauseUi(services).resources->SetLanguageID(screen,0x18B2DBC8u,title);
             break;
         }
     }
@@ -160,6 +161,14 @@ bool PauseDisplayOpts::CycleTrackMap(std::int32_t direction)
     Require(flow,"Track-map cycle has no actual application-flow owner");
     const bool changed=globalDisplaySettingsCycleTrackMapMode(&DisplaySettings(services_),direction,
         &PauseParameters(services_),&flow->currentState,&services_.players->count)!=0;
+    if (changed && flow->currentState!=3) {
+        const auto& display=DisplaySettings(services_);
+        const auto mode=PauseParameters(services_).specialPursuit?display.pursuitTrackMapMode:
+            services_.players->count==1?display.singleViewTrackMapMode:display.splitViewTrackMapMode;
+        // The first player owns the shared two-player map (PAL 179578–17959C).
+        auto* mapOwner=services_.players->playersByNumber[0];
+        if (mapOwner && mapOwner->ownedState)carFramePlayerSetTrackMapMode(mapOwner,mode,true);
+    }
     DisplayTrackmap();return changed;
 }
 bool PauseDisplayOpts::ToggleHudHotKey()
@@ -463,7 +472,11 @@ void PauseMenu::MenuCallback(ScreenMessage message,ScreenCallbackData& data)
         case 0x52E039FAu:PauseScreens(services_).ChangeToScreen(pauseNames[4],false);break;
         default:break;
         }
-    } else if (message==ScreenMessage::LeaveScreen) {data.sound=0;data.value=0;}
+    } else if (message==ScreenMessage::LeaveScreen) {
+        // Keyboard Esc arrives as Back. Only the root uses Back to resume.
+        data.value=0;
+        data.sound=state_==1 && MaybeResume(data.joystickPort)?7:0;
+    }
     else if (message==ScreenMessage::ScreenBack) {
         if (MaybeResume(data.joystickPort))data.sound=7;
         data.value=1;
@@ -628,6 +641,11 @@ void PauseAudioOpts::RedrawAudioMode(std::int32_t mode)
 }
 void PauseAudioOpts::MenuCallback(ScreenMessage message,ScreenCallbackData& data)
 {
+    if(message==ScreenMessage::SliderDrag || message==ScreenMessage::SliderCommit) {
+        if(auto* slider=FindSlider(data.key))
+            slider->SetDisplayValue(FlailerSlider::VolumeAtPointer(data.value),false,true);
+        return;
+    }
     PauseScreenBase::HandleEvent(message,data);
     if (message==ScreenMessage::ScreenBack) {
         Require(boundPause,"Audio resume has no actual PauseMenu");
@@ -639,7 +657,8 @@ void PauseAudioOpts::MenuCallback(ScreenMessage message,ScreenCallbackData& data
         if (data.key==0x52E039F8u) {
             if (ChangeAudioMode(message)) {data.sound=message==ScreenMessage::Left?1:2;valueHighlight_.ForceStart();}
         } else if (auto* slider=FindSlider(data.key))
-            slider->StepValue(message==ScreenMessage::Left?-0.05000000074505806f:0.05000000074505806f,false);
+            slider->SetDisplayValue(slider->position.desiredValue+
+                (message==ScreenMessage::Left?-1.0f:1.0f)*FlailerSlider::VolumeStep,false);
     } else if (message==ScreenMessage::Tick) {
         for (const auto& slider:sliders_)slider->Animate();
         valueHighlight_.Animate();
@@ -825,8 +844,9 @@ void PauseDebugMenu::MenuCallback(ScreenMessage message,ScreenCallbackData& data
 {
     if(message==ScreenMessage::Left || message==ScreenMessage::Right) {
         PauseUi(services_).sound->Play(1);OnMenuItemScroll(message,data);
-    } else if(message==ScreenMessage::LeaveScreen) {
-        PauseScreens(services_).ChangeToScreen(pauseNames[0],false);data.value=0;
+    } else if(message==ScreenMessage::LeaveScreen || message==ScreenMessage::ScreenBack) {
+        data.value=message==ScreenMessage::ScreenBack?1:0;
+        PauseScreens(services_).ChangeToScreen(pauseNames[0],false);
     } else if(message==ScreenMessage::Select && data.key==0xAEE77883u) {
         // Native orderly process-exit equivalent of the retained source
         // debug exit request; cleanup still belongs to ApplicationRuntime.
@@ -901,7 +921,10 @@ PauseOptions::PauseOptions(RaceScreenServices& services,std::uint32_t screen,std
     for (std::size_t index=0;index<2;++index) {
         auto* player=services.players->playersByNumber[index];
         if (player && player->movement.controllerPort==port) {
-            player_=player;ui.resources->SetLanguageID(screen,0x18B2DBC8u,index?0x334B6u:0x334B5u);break;
+            player_=player;
+            const auto title=services.players->count==1 ? 200004u : (index?0x334B6u:0x334B5u);
+            ui.resources->SetLanguageID(screen,0x18B2DBC8u,title);
+            break;
         }
     }
     (void)Player();

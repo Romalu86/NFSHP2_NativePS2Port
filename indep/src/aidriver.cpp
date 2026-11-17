@@ -176,9 +176,7 @@ DriverAIAction* aiDriverCreateAction(AIDriver* owner,int32_t kind)
     const int32_t previousPriority=driver->action?driver->action->priority:-1;
     DriverAIPerception* perception=&driver->perception;
     const int32_t recoveryTicks=(int32_t)((uint32_t)now-(uint32_t)driver->lastRecoveryActionTicks);
-    // Native PC arbitration lets the existing recovery checks interrupt a
-    // RoadBlock action with the original priority, history and cooldown.
-    if(previousKind!=7&&(previousPriority<=500||previousKind==8)&&
+    if(previousKind!=7&&previousPriority<=500&&
         6.0f<(float)recoveryTicks*0.0002500000118743628f){
         const int32_t priority=driverAIActionRecoveryPriority(driver,perception);
         if(driver->result!=CAR_DRIVER_OK)return NULL;
@@ -194,8 +192,7 @@ DriverAIAction* aiDriverCreateAction(AIDriver* owner,int32_t kind)
             return action;
         }
     }
-    // Let recovery finish under its own criteria before proposing RoadBlock.
-    if(previousKind!=8&&previousKind!=7&&previousPriority<=600){
+    if(previousKind!=8&&previousPriority<=600){
         PursuitRoadBlock* block=NULL;
         const int32_t priority=driverAIActionRoadBlockPriority(driver,perception,&block);
         if(driver->result!=CAR_DRIVER_OK)return NULL;

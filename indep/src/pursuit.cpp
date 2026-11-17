@@ -1,5 +1,6 @@
 #include "indep/inc/Pursuit.hpp"
 #include "indep/inc/CopDriver.hpp"
+#include "indep/inc/DemoDisc.hpp"
 #include "bware/inc/bMath.hpp"
 #include "Chopper.hpp"
 #include "indep/inc/CarInfo.hpp"
@@ -1076,7 +1077,8 @@ WorldServicesResult pursuitGroupRoadBlockDefeated(PursuitManager* manager,Pursui
             }
             if(!manager->parameters->specialPursuit && group->owner->speechLevel==6) {
                 bool request=false;
-                if(!pursuitLimitAiPursuitsToOne) {
+                // PAL229A90 consults the policy before consuming World RNG.
+                if(TheDemoDiscManager.ActivationWord()==0) {
                     const int32_t laps=manager->parameters->pointToPoint ? 1 : manager->parameters->totalLaps;
                     if(laps==2)request=true;
                     else if(worldRandomBounded(manager->world,3)<2)request=manager->parameters->chopperEnabled!=0;

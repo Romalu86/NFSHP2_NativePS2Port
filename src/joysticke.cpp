@@ -267,12 +267,12 @@ const NativeInputSnapshot& NativeInputTimeline::Sample(Clock::time_point boundar
     sampled_=true;lastBoundary_=boundary;return state_;
 }
 
-bool NativeKeyboardEnabled(const NativeInputSettings& settings,std::int32_t port) noexcept
+bool NativeKeyboardEnabled(const NativeInputSettings& settings,std::int32_t port,bool split,bool gamepadConnected) noexcept
 {
     if(port<0 || port>=2)return false;
     const auto mode=settings.deviceMode[static_cast<std::size_t>(port)];
     return mode==NativeDeviceMode::Keyboard || mode==NativeDeviceMode::KeyboardAndGamepad ||
-        (mode==NativeDeviceMode::Automatic && port==0);
+        (mode==NativeDeviceMode::Automatic && (port==0 || (split && !gamepadConnected)));
 }
 bool NativeGamepadEnabled(const NativeInputSettings& settings,std::int32_t port) noexcept
 {
@@ -287,12 +287,36 @@ const std::array<std::uint16_t,20>& NativeKeyboardBindings(const NativeInputSett
     if(port<0 || port>=2)throw std::out_of_range("Native input player port");
     return port==0?settings.keys:settings.player2Keys;
 }
+
+void FilterNativeSharedKeyboardKeys(const NativeInputSettings& settings,std::int32_t port,std::array<bool,256>& keys) noexcept
+{
+    static const NativeInputSettings defaults;
+    const auto priority=[](const NativeInputSettings& input,std::size_t seat,std::uint16_t key) {
+        const auto& bindings=seat==0?input.keys:input.player2Keys;
+        if(std::find(bindings.begin(),bindings.begin()+18,key)!=bindings.begin()+18)return 2;
+        const auto& zones=input.zoneKeys[seat];
+        return std::find(zones.begin(),zones.end(),key)!=zones.end()?1:0;
+    };
+    for(std::uint16_t key=1;key<keys.size();++key) {
+        if(!keys[key])continue;
+        // Escape belongs to the first seat. Driving takes priority over
+        // shortcuts such as the legacy F/G zone commands. Resolve older
+        // duplicate driving bindings by their default seat, then player one.
+        if(key==0x1b) {keys[key]=port==0;continue;}
+        const auto first=priority(settings,0,key),second=priority(settings,1,key);
+        if(!first || !second)continue;
+        const int owner=first==second?(priority(defaults,1,key)>priority(defaults,0,key)?1:0):(second>first?1:0);
+        if(port!=owner)keys[key]=false;
+    }
+}
 void ValidateNativeInputSettings(const NativeInputSettings& settings)
 {
     for(const auto* keys:{&settings.keys,&settings.player2Keys})for(const auto key:*keys)
         if(key>254)throw std::invalid_argument("Keyboard binding is outside the Windows virtual-key range");
     for(const auto controller:settings.controller)if(controller<-1 || controller>255)
         throw std::invalid_argument("Invalid legacy controller index");
+    if(settings.promptStyle<0 || settings.promptStyle>2 || settings.steeringSensitivity<50 || settings.steeringSensitivity>200)
+        throw std::invalid_argument("Invalid native controller preferences");
     if(settings.leftDeadzone<0 || settings.leftDeadzone>29490 ||
         settings.rightDeadzone<0 || settings.rightDeadzone>29490)
         throw std::invalid_argument("Stick deadzone must be between 0 and 90 percent");
@@ -326,7 +350,8 @@ void ValidateNativeInputSettings(const NativeInputSettings& settings)
                 throw std::invalid_argument("Invalid controller axis, deadzone or saturation range");
         }
         if(profile.triggerThreshold<-1 || profile.triggerThreshold>229 ||
-            profile.vibrationScale<0 || profile.vibrationScale>100)
+            profile.vibrationScale<0 || profile.vibrationScale>100 ||
+            profile.policeRadioVolume<0 || profile.policeRadioVolume>100)
             throw std::invalid_argument("Invalid controller trigger deadzone or vibration strength");
     }
     if(NativeGamepadEnabled(settings,0) && NativeGamepadEnabled(settings,1)) {
@@ -352,9 +377,6 @@ void MigrateNativeInputPreferences(NativeInputSettings& settings)
         }
     }
     migrated.swapSticks=false;migrated.invertSteering=false;migrated.invertLookY=false;
-    for(std::size_t player=0;player<2;++player)
-        if(migrated.deviceMode[player]==NativeDeviceMode::Automatic && migrated.controller[player]<0 && migrated.deviceKey[player].empty())
-            migrated.deviceMode[player]=player==0?NativeDeviceMode::Keyboard:NativeDeviceMode::Disabled;
     ValidateNativeInputSettings(migrated);settings=std::move(migrated);
 }
 
@@ -378,8 +400,11 @@ std::int32_t ResolveNativePlayerDevice(const NativeInputSettings& settings,
 {
     if(!NativeGamepadEnabled(settings,port))return -1;
     const auto player=static_cast<std::size_t>(port);
-    if(!settings.deviceKey[player].empty())
-        return ResolveNativeDevice(devices,settings.deviceKey[player],-1);
+    if(!settings.deviceKey[player].empty()) {
+        const auto chosen=ResolveNativeDevice(devices,settings.deviceKey[player],-1);
+        if(port==1 && chosen>=0 && chosen==ResolveNativePlayerDevice(settings,devices,0))return -1;
+        return chosen;
+    }
     int reserved=-1;
     if(port==1)reserved=ResolveNativePlayerDevice(settings,devices,0);
     else if(NativeGamepadEnabled(settings,1) && !settings.deviceKey[1].empty())
@@ -500,6 +525,79 @@ const char* NativeInputActionName(std::size_t action) noexcept
     return action<20?names[action]:"Unknown action";
 }
 
+namespace {
+constexpr std::array<std::uint16_t,20> MenuKeys{{
+    0x08,0,0,0,0x26,0x27,0x28,0x25,'1','2','Q','E',0x1b,0x70,0x0d,0x20,0,0,0,0}};
+constexpr std::array<std::uint16_t,20> SplitMenuKeysOne{{
+    0x08,0,0,0,0x26,0x27,0x28,0x25,0,0,0xbc,0xbe,0x1b,0x70,0x0d,0xa3,0,0,0,0}};
+constexpr std::array<std::uint16_t,20> SplitMenuKeysTwo{{
+    'R',0,0,0,'W','D','S','A','1','2','Q','E','C',0x71,0x20,'F',0,0,0,0}};
+}
+
+std::string NativeKeyName(std::uint16_t key)
+{
+    if((key>='0' && key<='9') || (key>='A' && key<='Z'))return std::string(1,static_cast<char>(key));
+    if(key>=0x70 && key<=0x87)return "F"+std::to_string(key-0x6f);
+    if(key>=0x60 && key<=0x69)return "Num "+std::to_string(key-0x60);
+    switch(key) {
+    case 0:return "-";
+    case 8:return "Backspace";
+    case 9:return "Tab";
+    case 13:return "Enter";
+    case 27:return "Esc";
+    case 32:return "Space";
+    case 37:return "Left";
+    case 38:return "Up";
+    case 39:return "Right";
+    case 40:return "Down";
+    case 46:return "Delete";
+    case 0xa0:case 0xa1:case 0x10:return "Shift";
+    case 0x11:case 0xa2:case 0xa3:return "Ctrl";
+    case 0x12:case 0xa4:case 0xa5:return "Alt";
+    default:return "VK "+std::to_string(key);
+    }
+}
+
+ControllerState NativeMenuInputState(const NativeInputSettings& settings,std::int32_t port,
+    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused,bool split)
+{
+    static const NativeInputSettings keyboard=[] {
+        NativeInputSettings layout;
+        layout.keys=layout.player2Keys=MenuKeys;
+        layout.deviceMode.fill(NativeDeviceMode::Keyboard);
+        return layout;
+    }();
+    static const auto shared=[] {
+        auto layout=keyboard;
+        layout.keys=SplitMenuKeysOne;
+        layout.player2Keys=SplitMenuKeysTwo;
+        return layout;
+    }();
+    static const NativeInputSettings gamepad=[] {
+        NativeInputSettings layout;
+        layout.deviceMode.fill(NativeDeviceMode::Gamepad);
+        for(auto& profile:layout.profiles) {
+            profile.buttons[12]={NativeBindingKind::Button,1,0};
+            profile.buttons[13]={NativeBindingKind::Button,3,0};
+        }
+        return layout;
+    }();
+    const bool enableKeyboard=split?NativeKeyboardEnabled(settings,port,true,pad.connected):port==0;
+    auto state=NativeInputState(gamepad,port,
+        NativeGamepadEnabled(settings,port)?pad:NativePadSample{},keys,focused);
+    if(!enableKeyboard) {
+        state.connected|=NativeKeyboardEnabled(settings,port,split,pad.connected);
+        return state;
+    }
+    const auto keyState=NativeInputState(split?shared:keyboard,port,{},keys,focused);
+    state.held|=keyState.held;
+    if(port==0 && focused && keys[0x2e])SetButton(state,Ps2Button::Square,true);
+    state.connected=true;
+    for(std::size_t i=0;i<state.pressures.size();++i)
+        state.pressures[i]=std::max(state.pressures[i],keyState.pressures[i]);
+    return state;
+}
+
 void NativeCheatTextInput::Cancel() noexcept
 {
     text_.fill(0);length_=0;capturing_=false;
@@ -599,12 +697,12 @@ void AssignNativePlayerOneGamepad(NativeInputSettings& settings,std::int32_t gam
 }
 
 ControllerState NativeInputState(const NativeInputSettings& settings,std::int32_t port,
-    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused)
+    const NativePadSample& pad,const std::array<bool,256>& keys,bool focused,bool drivingKeyboard,bool split)
 {
     if(port<0 || port>=2)throw std::out_of_range("Native input player port");
     const auto player=static_cast<std::size_t>(port);
     const bool connected=NativeGamepadEnabled(settings,port) && pad.connected;
-    const bool keyboard=NativeKeyboardEnabled(settings,port);
+    const bool keyboard=NativeKeyboardEnabled(settings,port,split,connected);
     ControllerState state;state.connected=connected || keyboard;
     if(!focused)return state;
     const auto& profile=settings.profiles[player];
@@ -637,18 +735,24 @@ ControllerState NativeInputState(const NativeInputSettings& settings,std::int32_
                 const int scaled=magnitude*(value<0?32768:32767)/maximum;
                 value=value<0?-scaled:scaled;
             }
+            if(drivingKeyboard && i==2)value=std::clamp(value*settings.steeringSensitivity/100,-32768,32767);
             state.sticks[i]=NormalizeAxis(static_cast<std::int16_t>(value));
         }
     }
     if(keyboard) {
         const auto& bindings=NativeKeyboardBindings(settings,port);
         const auto held=[&](std::size_t index){const auto key=bindings[index];return key<keys.size() && key && keys[key];};
-        for(unsigned i=0;i<16;++i)if(held(i))SetButton(state,static_cast<Ps2Button>(i),true);
-        if(held(18))SetButton(state,Ps2Button::Cross,true);
-        if(held(19))SetButton(state,Ps2Button::Triangle,true);
+        for(unsigned i=0;i<16;++i)
+            if(held(i) && (!drivingKeyboard || i!=3))SetButton(state,static_cast<Ps2Button>(i),true);
+        if(!drivingKeyboard) {
+            if(held(18))SetButton(state,Ps2Button::Cross,true);
+            if(held(19))SetButton(state,Ps2Button::Triangle,true);
+        }
         const bool left=held(16),right=held(17);
-        const bool inverted=settings.invertSteering ^ profile.invert[settings.swapSticks?0:2];
-        if(left!=right)state.sticks[2]=(left!=inverted)?0:255;
+        if(left!=right) {
+            if(drivingKeyboard)SetButton(state,left?Ps2Button::Left:Ps2Button::Right,true);
+            else state.sticks[2]=left?0:255;
+        }
     }
     return state;
 }
@@ -696,10 +800,17 @@ JoystickControls NativeScannerControls(const ControllerState& state) noexcept {
 #include <windows.h>
 #define SDL_MAIN_HANDLED
 #include "third_party/SDL2/include/SDL.h"
+#include <condition_variable>
 #include <filesystem>
 #include <exception>
+#include <cfgmgr32.h>
+#include <objbase.h>
+#include <initguid.h>
+#include <devpkey.h>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 
 namespace {
 // Function pointer types come from the shipped, unmodified SDL2 headers.
@@ -715,7 +826,7 @@ struct Sdl2Api {
     decltype(&SDL_SetMainReady) mainReady{};
     decltype(&SDL_GetVersion) version{};
     decltype(&SDL_GetError) getError{};
-    decltype(&SDL_SetHint) hint{};
+    decltype(&SDL_SetHintWithPriority) hint{};
     decltype(&SDL_NumJoysticks) count{};
     decltype(&SDL_JoystickGetDeviceInstanceID) deviceId{};
     decltype(&SDL_IsGameController) isController{};
@@ -723,10 +834,14 @@ struct Sdl2Api {
     decltype(&SDL_GameControllerClose) closeController{};
     decltype(&SDL_GameControllerGetJoystick) controllerJoystick{};
     decltype(&SDL_GameControllerName) controllerName{};
+    decltype(&SDL_GameControllerGetType) controllerType{};
     decltype(&SDL_GameControllerGetAttached) controllerAttached{};
     decltype(&SDL_GameControllerGetButton) controllerButton{};
     decltype(&SDL_GameControllerGetAxis) controllerAxis{};
     decltype(&SDL_GameControllerRumble) controllerRumble{};
+    decltype(&SDL_GameControllerSendEffect) sendControllerEffect{};
+    decltype(&SDL_JoystickGetVendor) joystickVendor{};
+    decltype(&SDL_JoystickGetProduct) joystickProduct{};
     decltype(&SDL_JoystickOpen) openJoystick{};
     decltype(&SDL_JoystickClose) closeJoystick{};
     decltype(&SDL_JoystickName) joystickName{};
@@ -743,6 +858,8 @@ struct Sdl2Api {
     decltype(&SDL_JoystickNumHats) joystickHats{};
     decltype(&SDL_JoystickRumble) joystickRumble{};
     decltype(&SDL_JoystickUpdate) update{};
+    decltype(&SDL_LockJoysticks) lockJoysticks{};
+    decltype(&SDL_UnlockJoysticks) unlockJoysticks{};
     decltype(&SDL_PumpEvents) pump{};
     decltype(&SDL_PeepEvents) peep{};
     decltype(&SDL_GetTicks64) ticks{};
@@ -781,7 +898,7 @@ struct Sdl2Api {
         HP2_SDL2_RESOLVE("SDL_SetMainReady",mainReady)
         HP2_SDL2_RESOLVE("SDL_GetVersion",version)
         HP2_SDL2_RESOLVE("SDL_GetError",getError)
-        HP2_SDL2_RESOLVE("SDL_SetHint",hint)
+        HP2_SDL2_RESOLVE("SDL_SetHintWithPriority",hint)
         HP2_SDL2_RESOLVE("SDL_NumJoysticks",count)
         HP2_SDL2_RESOLVE("SDL_JoystickGetDeviceInstanceID",deviceId)
         HP2_SDL2_RESOLVE("SDL_IsGameController",isController)
@@ -789,10 +906,14 @@ struct Sdl2Api {
         HP2_SDL2_RESOLVE("SDL_GameControllerClose",closeController)
         HP2_SDL2_RESOLVE("SDL_GameControllerGetJoystick",controllerJoystick)
         HP2_SDL2_RESOLVE("SDL_GameControllerName",controllerName)
+        HP2_SDL2_RESOLVE("SDL_GameControllerGetType",controllerType)
         HP2_SDL2_RESOLVE("SDL_GameControllerGetAttached",controllerAttached)
         HP2_SDL2_RESOLVE("SDL_GameControllerGetButton",controllerButton)
         HP2_SDL2_RESOLVE("SDL_GameControllerGetAxis",controllerAxis)
         HP2_SDL2_RESOLVE("SDL_GameControllerRumble",controllerRumble)
+        HP2_SDL2_RESOLVE("SDL_GameControllerSendEffect",sendControllerEffect)
+        HP2_SDL2_RESOLVE("SDL_JoystickGetVendor",joystickVendor)
+        HP2_SDL2_RESOLVE("SDL_JoystickGetProduct",joystickProduct)
         HP2_SDL2_RESOLVE("SDL_JoystickOpen",openJoystick)
         HP2_SDL2_RESOLVE("SDL_JoystickClose",closeJoystick)
         HP2_SDL2_RESOLVE("SDL_JoystickName",joystickName)
@@ -809,6 +930,8 @@ struct Sdl2Api {
         HP2_SDL2_RESOLVE("SDL_JoystickNumHats",joystickHats)
         HP2_SDL2_RESOLVE("SDL_JoystickRumble",joystickRumble)
         HP2_SDL2_RESOLVE("SDL_JoystickUpdate",update)
+        HP2_SDL2_RESOLVE("SDL_LockJoysticks",lockJoysticks)
+        HP2_SDL2_RESOLVE("SDL_UnlockJoysticks",unlockJoysticks)
         HP2_SDL2_RESOLVE("SDL_PumpEvents",pump)
         HP2_SDL2_RESOLVE("SDL_PeepEvents",peep)
         HP2_SDL2_RESOLVE("SDL_GetTicks64",ticks)
@@ -822,7 +945,14 @@ struct Sdl2Api {
         mainReady();
         // SDL does not own our Win32 window. NativeInputState explicitly gates
         // gameplay on that window's focus, including both keyboard profiles.
-        (void)hint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+        (void)hint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1",SDL_HINT_NORMAL);
+        // This process owns the SDL controller subsystem. The launcher polls
+        // explicitly, then a single game sampler runs until its catalog closes.
+        // The window event pump keeps delivering events without polling HID.
+        if(hint(SDL_HINT_AUTO_UPDATE_JOYSTICKS,"0",SDL_HINT_OVERRIDE)!=SDL_TRUE) {
+            error="Could not configure SDL2 joystick update ownership";
+            return;
+        }
         if(init(SDL_INIT_GAMECONTROLLER|SDL_INIT_JOYSTICK|SDL_INIT_EVENTS)!=0) {
             error=std::string("SDL2 controller initialization failed: ")+getError();return;
         }
@@ -841,6 +971,15 @@ struct Sdl2Api {
     Sdl2Api(const Sdl2Api&)=delete;
     Sdl2Api& operator=(const Sdl2Api&)=delete;
 };
+class SdlJoystickLock final {
+public:
+    explicit SdlJoystickLock(Sdl2Api& api):api_(api){api_.lockJoysticks();}
+    ~SdlJoystickLock(){api_.unlockJoysticks();}
+    SdlJoystickLock(const SdlJoystickLock&)=delete;
+    SdlJoystickLock& operator=(const SdlJoystickLock&)=delete;
+private:
+    Sdl2Api& api_;
+};
 Sdl2Api& ProcessInputApi()
 {
     // Keep SDL's instance identities alive from launcher discovery through
@@ -857,6 +996,44 @@ std::string EncodeInputIdentity(const char* value)
     }
     return output;
 }
+// SDL supplies the USB/Bluetooth transport and submits the HID effect bytes.
+using DualSenseEffect=std::array<std::uint8_t,47>;
+
+std::wstring ControllerContainer(const std::string& path)
+{
+    if(path.empty())return {};
+    // The SDL HID path identifies the actual PnP interface. A name or product
+    // ID alone cannot distinguish two identical controllers.
+    struct ConfigurationManager {
+        HMODULE module{LoadLibraryExW(L"cfgmgr32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ~ConfigurationManager() {if(module)FreeLibrary(module);}
+
+    };
+    static const ConfigurationManager cm;
+    if(!cm.module)return {};
+    const auto interfaceProperty=reinterpret_cast<decltype(&CM_Get_Device_Interface_PropertyW)>(
+        GetProcAddress(cm.module,"CM_Get_Device_Interface_PropertyW"));
+    const auto locate=reinterpret_cast<decltype(&CM_Locate_DevNodeW)>(GetProcAddress(cm.module,"CM_Locate_DevNodeW"));
+    const auto nodeProperty=reinterpret_cast<decltype(&CM_Get_DevNode_PropertyW)>(GetProcAddress(cm.module,"CM_Get_DevNode_PropertyW"));
+    if(!interfaceProperty || !locate || !nodeProperty)return {};
+    const auto interfacePath=std::filesystem::u8path(path).wstring();
+    std::array<wchar_t,MAX_DEVICE_ID_LEN> instance{};
+    DEVPROPTYPE type{};ULONG size=sizeof(instance);
+    if(interfaceProperty(interfacePath.c_str(),&DEVPKEY_Device_InstanceId,&type,
+        reinterpret_cast<PBYTE>(instance.data()),&size,0)!=CR_SUCCESS || type!=DEVPROP_TYPE_STRING)return {};
+    // Bluetooth uses HID alone. The USB interface also exposes the audio DAC.
+    std::wstring id(instance.data());
+    std::transform(id.begin(),id.end(),id.begin(),[](wchar_t c){return static_cast<wchar_t>(towupper(c));});
+    if(id.find(L"&MI_")==std::wstring::npos)return {};
+    DEVINST node{};
+    if(locate(&node,instance.data(),CM_LOCATE_DEVNODE_NORMAL)!=CR_SUCCESS)return {};
+    GUID container{};size=sizeof(container);
+    if(nodeProperty(node,&DEVPKEY_Device_ContainerId,&type,reinterpret_cast<PBYTE>(&container),
+        &size,0)!=CR_SUCCESS || type!=DEVPROP_TYPE_GUID || size!=sizeof(container) || IsEqualGUID(container,GUID_NULL))return {};
+    wchar_t text[39]{};
+    return StringFromGUID2(container,text,39)?std::wstring(text):std::wstring{};
+}
+
 struct Sdl2Device {
     Sdl2Api& api;
     SDL_GameController* controller{};
@@ -865,10 +1042,49 @@ struct Sdl2Device {
     hp2::platform::NativePadSample observed;
     std::string identityBase,pathIdentity,connectionIdentity;
     std::uint16_t rumbleLow{},rumbleHigh{};
-    ULONGLONG lastRumble{};
+    ULONGLONG lastRumble{}, effectRetry{}, speakerRetry{};
+    std::array<std::uint8_t,2> triggerForce{};
+    std::string hidPath;
+    std::wstring speakerContainer;
+    bool speakerConfigured{};
+    void SetTriggers(std::uint8_t left,std::uint8_t right) noexcept
+    {
+        const std::array<std::uint8_t,2> force{{left,right}};
+        if(!info.dualSense || !controller || triggerForce==force || !Attached())return;
+        const auto now=GetTickCount64();
+        if((left || right) && now<effectRetry)return;
+        DualSenseEffect effect{};
+        effect[0]=0x0c; // Both trigger effect fields are valid.
+        const auto encode=[&](std::size_t offset,std::uint8_t resistance) {
+            effect[offset]=resistance?0x01:0x05; // Continuous resistance / release.
+            effect[offset+1]=resistance?32:0;
+            effect[offset+2]=resistance;
+        };
+        encode(10,right);
+        encode(21,left);
+        if(api.sendControllerEffect(controller,effect.data(),static_cast<int>(effect.size()))==0)
+            triggerForce=force;
+        else effectRetry=now+1000;
+    }
+    std::wstring_view SpeakerContainer()
+    {
+        if(!info.dualSense || !controller || !Attached())return {};
+        const auto now=GetTickCount64();
+        if(!speakerConfigured && now>=speakerRetry) {
+            speakerRetry=now+2000;
+            if(speakerContainer.empty())speakerContainer=ControllerContainer(hidPath);
+            if(speakerContainer.empty())return {};
+            DualSenseEffect effect{};
+            effect[0]=0xa0; // Speaker volume and audio routing only.
+            effect[5]=0x50;
+            effect[7]=0x20; // USB right channel to speaker; keep the headset path.
+            speakerConfigured=api.sendControllerEffect(controller,effect.data(),static_cast<int>(effect.size()))==0;
+        }
+        return speakerConfigured?std::wstring_view(speakerContainer):std::wstring_view{};
+    }
     explicit Sdl2Device(Sdl2Api& value):api(value){}
     ~Sdl2Device() {
-        if(controller) {(void)api.controllerRumble(controller,0,0,0);api.closeController(controller);}
+        if(controller) {SetTriggers(0,0);(void)api.controllerRumble(controller,0,0,0);api.closeController(controller);}
         else if(joystick) {(void)api.joystickRumble(joystick,0,0,0);api.closeJoystick(joystick);}
     }
     bool Attached() const noexcept {
@@ -928,6 +1144,34 @@ struct WindowsInputCatalog::Storage {
     std::vector<platform::NativePadObservation> pending;
     bool captureObservations{};
     ULONGLONG lastUpdate{~ULONGLONG{0}};
+    std::mutex samplerMutex;
+    std::condition_variable samplerWake;
+    std::thread sampler;
+    bool stopSampler{};
+    ~Storage() {
+        if(!sampler.joinable())return;
+        {
+            std::lock_guard<std::mutex> lock(samplerMutex);
+            stopSampler=true;
+        }
+        samplerWake.notify_one();
+        sampler.join();
+    }
+    void StartSampler() {
+        if(!api.initialized || sampler.joinable())return;
+        // SDL queues timestamped joystick reports while the window thread
+        // waits for the GPU. Windows messages stay on their original thread.
+        sampler=std::thread([this] {
+            const auto com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+            std::unique_lock<std::mutex> lock(samplerMutex);
+            while(!samplerWake.wait_for(lock,std::chrono::milliseconds(4),[this]{return stopSampler;})) {
+                lock.unlock();
+                api.update();
+                lock.lock();
+            }
+            if(SUCCEEDED(com))CoUninitialize();
+        });
+    }
     void Observe(platform::NativeInputTimeline::Clock::time_point time,Sdl2Device& device,
         const platform::NativePadSample& sample) {
         device.observed=sample;
@@ -977,14 +1221,15 @@ struct WindowsInputCatalog::Storage {
     }
     void Refresh() {
         if(!api.initialized)return;
+        const auto refreshTick=api.ticks();
+        if(refreshTick==lastUpdate)return;
+        lastUpdate=refreshTick;
+        api.pump();
+        SdlJoystickLock joystickLock(api);
+        if(!sampler.joinable())api.update();
         const auto now=GetTickCount64();
-        if(now==lastUpdate)return;
-        lastUpdate=now;
-        api.pump();api.update();
         const auto observationTime=platform::NativeInputTimeline::Clock::now();
         // Keep every delivered input transition with SDL's own timestamp.
-        // PumpEvents stays on the native window thread. A driver which only
-        // observes current hardware state at Pump cannot provide older edges.
         DrainEvents();
         const int count=std::max(0,api.count());
         ids.clear();ids.reserve(static_cast<std::size_t>(count));
@@ -1012,6 +1257,7 @@ struct WindowsInputCatalog::Storage {
             info.guid=guid;
             const char* serial=api.joystickSerial(device->joystick);
             const char* path=api.joystickPath(device->joystick);
+            if(path)device->hidPath=path;
             const auto serialIdentity=serial && *serial?info.guid+"/serial/"+EncodeInputIdentity(serial):std::string{};
             // XInput#N is an assignable slot, not a physical device path.
             if(path && *path && std::strncmp(path,"XInput#",7)!=0)
@@ -1022,6 +1268,14 @@ struct WindowsInputCatalog::Storage {
             info.id=device->identityBase;
             info.axes=info.standardized?SDL_CONTROLLER_AXIS_MAX:std::clamp(api.joystickAxes(device->joystick),0,16);
             info.buttons=info.standardized?SDL_CONTROLLER_BUTTON_MAX:std::clamp(api.joystickButtons(device->joystick),0,64);
+            if(device->controller) {
+                const auto type=api.controllerType(device->controller);
+                info.playStation=type==SDL_CONTROLLER_TYPE_PS3 || type==SDL_CONTROLLER_TYPE_PS4 ||
+                    type==SDL_CONTROLLER_TYPE_PS5;
+                const auto product=api.joystickProduct(device->joystick);
+                info.dualSense=type==SDL_CONTROLLER_TYPE_PS5 && api.joystickVendor(device->joystick)==0x054c &&
+                    (product==0x0ce6 || product==0x0df2);
+            }
             info.hats=info.standardized?0:std::clamp(api.joystickHats(device->joystick),0,4);
             const auto initial=device->Snapshot();Observe(platform::NativeInputTimeline::Clock::now(),*device,initial);
             devices.push_back(std::move(device));
@@ -1086,6 +1340,7 @@ platform::NativePadSample WindowsInputCatalog::Read(const std::string& key,std::
 void WindowsInputCatalog::PollObservations(std::vector<platform::NativePadObservation>& output)
 {
     storage_->captureObservations=true;storage_->Refresh();
+    storage_->StartSampler();
     output.clear();output.swap(storage_->pending);
 }
 void WindowsInputCatalog::Rumble(const std::string& key,std::int32_t fallbackIndex,std::uint16_t low,std::uint16_t high,bool refresh)
@@ -1101,6 +1356,20 @@ void WindowsInputCatalog::StopRumble() noexcept
     for(const auto& device:storage_->devices)if(device->Attached())device->SetRumble(0,0,now);
 }
 
+void WindowsInputCatalog::SetDualSenseTriggers(const std::string& key,std::uint8_t left,std::uint8_t right) noexcept
+{
+    if(auto* device=storage_->Find(key,-1,false))device->SetTriggers(left,right);
+}
+void WindowsInputCatalog::StopDualSenseTriggers() noexcept
+{
+    for(const auto& device:storage_->devices)device->SetTriggers(0,0);
+}
+std::wstring_view WindowsInputCatalog::DualSenseSpeakerContainer(const std::string& key)
+{
+    auto* device=storage_->Find(key,-1,false);
+    return device?device->SpeakerContainer():std::wstring_view{};
+}
+
 struct WindowsInputDevice::Storage {
     HWND window{};
     WindowsInputCatalog catalog;
@@ -1114,6 +1383,16 @@ struct WindowsInputDevice::Storage {
     std::array<std::string,2> selectedKeys;
     std::array<std::uint64_t,2> deliveredResetEpoch{};
     std::array<std::int32_t,2> journalIds{{-2,-2}};
+    std::array<std::string,2> deviceNames;
+    std::array<bool,2> playStation{},dualSense{},keyboardLast{{true,true}};
+    std::array<std::optional<std::int32_t>,2> previewRadioVolume;
+    platform::NativePromptDevice prompt{platform::NativePromptDevice::Keyboard};
+    platform::NativeInputSnapshot previous;
+    std::array<std::array<int,2>,2> zoneHeld{};
+    std::uint16_t capturedKey{};
+    std::int32_t capturePort{-1};
+    bool menuInput{},pauseInput{},splitInput{},replayInput{},captureReady{},inputBlocked{},waitForRelease{},escapeEdge{};
+    bool escapeStartedInGame{};
     std::vector<platform::NativePadObservation> observations;
     std::exception_ptr failure;
     bool focused{},seedKeys{},preparedStep{};
@@ -1131,7 +1410,7 @@ struct WindowsInputDevice::Storage {
         if(value==focused)return;
         focused=value;timeline.Focus(time,value);physicalKeys.fill(false);
         seedKeys=value;
-        if(!value) {cheatText.Cancel();catalog.StopRumble();}
+        if(!value) {cheatText.Cancel();catalog.StopRumble();catalog.StopDualSenseTriggers();}
     }
     void Key(platform::NativeInputTimeline::Clock::time_point time,std::uint16_t key,bool down,bool delivered=false) {
         // A sent focus loss can be dispatched before older posted key messages.
@@ -1195,11 +1474,12 @@ bool WindowsInputDevice::HandleWindowInput(std::uint32_t message,std::uintptr_t 
         device.failure=std::current_exception();return false;
     }
 }
-void WindowsInputDevice::Poll()
+void WindowsInputDevice::Poll(bool suppressEnter)
 {
     using namespace platform;auto& device=*storage_;
     if(device.failure)std::rethrow_exception(device.failure);
-    device.catalog.PollObservations(device.observations);
+    if(NativeGamepadEnabled(device.settings,0) || NativeGamepadEnabled(device.settings,1))
+        device.catalog.PollObservations(device.observations);
     if(device.failure)std::rethrow_exception(device.failure);
     // SDL's window-thread pump may dispatch sent Win32 focus messages too.
     const auto now=NativeInputTimeline::Clock::now();
@@ -1213,13 +1493,22 @@ void WindowsInputDevice::Poll()
         const auto selected=ResolveNativePlayerDevice(device.settings,devices,port);
         const auto key=selected>=0?devices[static_cast<std::size_t>(selected)].id:std::string{};
         const auto pad=selected>=0?device.catalog.Read(key,-1,false):NativePadSample{};
-        if(device.selectedIds[index]!=pad.instanceId)device.timeline.Controller(now,port,pad);
+        if(device.selectedIds[index]!=pad.instanceId) {
+            if(device.dualSense[index])device.catalog.SetDualSenseTriggers(device.selectedKeys[index],0,0);
+            device.timeline.Controller(now,port,pad);
+        }
         device.selectedIds[index]=pad.instanceId;device.selectedKeys[index]=key;
+        device.deviceNames[index]=selected>=0?devices[static_cast<std::size_t>(selected)].name:std::string{};
+        device.playStation[index]=selected>=0 && devices[static_cast<std::size_t>(selected)].playStation;
+        device.dualSense[index]=selected>=0 && devices[static_cast<std::size_t>(selected)].dualSense;
     }
     if(device.seedKeys) {
         // Keys held before focus was acquired have no delivered press in this
         // window. Seed only at the present observation, never back-date them.
-        for(std::uint16_t key=1;key<255;++key)device.Key(now,key,(GetAsyncKeyState(key)&0x8000)!=0,true);
+        for(std::uint16_t key=1;key<255;++key) {
+            const bool down=!(suppressEnter && key==VK_RETURN) && (GetAsyncKeyState(key)&0x8000)!=0;
+            device.Key(now,key,down,true);
+        }
         device.seedKeys=false;
     }
     if(!device.focused)device.physicalKeys.fill(false);
@@ -1229,9 +1518,63 @@ void WindowsInputDevice::Poll()
 }
 void WindowsInputDevice::BeginStep(platform::NativeInputTimeline::Clock::time_point boundary)
 {
+    using namespace platform;
     auto& device=*storage_;
     if(device.failure)std::rethrow_exception(device.failure);
     device.prepared=device.timeline.Sample(boundary,frontend::easterEggs.active!=0);device.preparedStep=true;
+    std::uint16_t pressedKey=0;
+    if(device.prepared.focused && !device.prepared.keyboardCaptured) {
+        for(std::uint16_t key=1;key<255;++key) {
+            if(key==0x10 || key==0x11 || key==0x12)continue;
+            if(device.prepared.keys[key] && !device.previous.keys[key]) {pressedKey=key;break;}
+        }
+        for(std::size_t port=0;port<device.prepared.pads.size();++port) {
+            const auto& pad=device.prepared.pads[port];
+            const auto& old=device.previous.pads[port];
+            NativeInputBinding change;
+            const auto overrideThreshold=device.settings.profiles[port].triggerThreshold;
+            const auto threshold=overrideThreshold<0?device.settings.triggerThreshold:overrideThreshold;
+            if(pad.connected && (old.instanceId!=pad.instanceId ||
+                (DetectNativeBinding(pad,old,change) && change.kind==NativeBindingKind::Button) ||
+                (pad.buttons&~old.buttons) ||
+                (pad.leftTrigger>threshold && old.leftTrigger<=threshold) ||
+                (pad.rightTrigger>threshold && old.rightTrigger<=threshold) ||
+                (std::abs(pad.leftX)>18000 && std::abs(old.leftX)<=18000) ||
+                (std::abs(pad.leftY)>18000 && std::abs(old.leftY)<=18000))) {
+                if(!device.menuInput)device.keyboardLast[port]=false;
+                device.prompt=GamepadPromptDevice(static_cast<std::int32_t>(port));
+            }
+        }
+        if(pressedKey) {
+            device.prompt=NativePromptDevice::Keyboard;
+            for(std::int32_t port=0;port<2;++port) {
+                const auto& keys=NativeKeyboardBindings(device.settings,port);
+                if(!device.menuInput && NativeKeyboardEnabled(device.settings,port,device.splitInput,device.prepared.pads[port].connected) &&
+                    (std::find(keys.begin(),keys.begin()+18,pressedKey)!=keys.begin()+18 ||
+                     (port==0 && pressedKey==0x1b)))device.keyboardLast[port]=true;
+            }
+        }
+    }
+    if(device.prompt!=NativePromptDevice::Keyboard &&
+        !device.prepared.pads[0].connected && !device.prepared.pads[1].connected)
+        device.prompt=NativePromptDevice::Keyboard;
+    const bool escapeDown=device.prepared.keys[VK_ESCAPE];
+    device.escapeEdge=escapeDown && !device.previous.keys[VK_ESCAPE];
+    if(!escapeDown)device.escapeStartedInGame=false;
+    else if(device.escapeEdge)device.escapeStartedInGame=(!device.menuInput && !device.pauseInput) || device.replayInput;
+    if(device.waitForRelease) {
+        const bool keyHeld=device.capturedKey && device.prepared.keys[device.capturedKey];
+        if(!keyHeld) {
+            device.waitForRelease=false;
+            device.capturePort=-1;
+        }
+    }
+    device.inputBlocked=device.capturePort>=0;
+    if(device.capturePort>=0 && !device.waitForRelease) {
+        const bool keysDown=std::any_of(device.prepared.keys.begin(),device.prepared.keys.end(),[](bool down){return down;});
+        if(!device.captureReady)device.captureReady=!keysDown;
+        else if(pressedKey && !device.capturedKey)device.capturedKey=pressedKey;
+    }
     for(const auto& command:device.prepared.textCommands)
         (void)frontend::easterEggs.TryUnlockTextCode(command.data(),command.size());
     for(std::int32_t port=0;port<2;++port) {
@@ -1240,7 +1583,97 @@ void WindowsInputDevice::BeginStep(platform::NativeInputTimeline::Clock::time_po
             joystickNotifyNativeInputReset(port);device.deliveredResetEpoch[index]=device.prepared.resetEpoch[index];
         }
     }
+    device.previous.keys=device.prepared.keys;
+    device.previous.pads=device.prepared.pads;
 }
+void WindowsInputDevice::SetMenuInput(bool menu,bool pause,bool split) noexcept
+{
+    if(menu && !storage_->menuInput)storage_->catalog.StopDualSenseTriggers();
+    storage_->menuInput=menu;
+    storage_->pauseInput=pause;
+    storage_->splitInput=split;
+}
+void WindowsInputDevice::SetReplayInput(bool enabled) noexcept {storage_->replayInput=enabled;}
+void WindowsInputDevice::SetSettings(const platform::NativeInputSettings& settings)
+{
+    platform::ValidateNativeInputSettings(settings);
+    const bool updatePrompt=storage_->settings.promptStyle!=settings.promptStyle &&
+        storage_->prompt!=platform::NativePromptDevice::Keyboard;
+    for(std::size_t port=0;port<2;++port)
+        if(!settings.profiles[port].adaptiveTriggers && storage_->dualSense[port])
+            storage_->catalog.SetDualSenseTriggers(storage_->selectedKeys[port],0,0);
+    storage_->settings=settings;
+    if(updatePrompt)storage_->prompt=GamepadPromptDevice(0);
+}
+void WindowsInputDevice::UseKeyboardPrompts() noexcept {storage_->prompt=platform::NativePromptDevice::Keyboard;}
+platform::NativePromptDevice WindowsInputDevice::PromptDevice() const noexcept {return storage_->prompt;}
+platform::NativePromptDevice WindowsInputDevice::GamepadPromptDevice(std::int32_t port) const noexcept
+{
+    const auto style=storage_->settings.promptStyle;
+    const bool playStation=port>=0 && port<2 && storage_->playStation[static_cast<std::size_t>(port)];
+    return style==2 || (style==0 && playStation)?platform::NativePromptDevice::PlayStation:platform::NativePromptDevice::Xbox;
+}
+std::string WindowsInputDevice::DeviceName(std::int32_t port) const
+{return storage_->deviceNames.at(static_cast<std::size_t>(port));}
+bool WindowsInputDevice::HasDualSense(std::int32_t port) const noexcept
+{
+    return port>=0 && port<2 && storage_->dualSense[static_cast<std::size_t>(port)];
+}
+void WindowsInputDevice::SetDrivingTriggers(std::int32_t port,std::uint32_t throttle,std::uint32_t brake) noexcept
+{
+    if(!HasDualSense(port))return;
+    using namespace platform;
+    auto& device=*storage_;
+    const auto index=static_cast<std::size_t>(port);
+    const auto& profile=device.settings.profiles[index];
+    std::array<std::uint8_t,2> strength{};
+    if(profile.adaptiveTriggers && device.focused && !device.menuInput && !device.inputBlocked &&
+        (!device.keyboardLast[index] || !NativeKeyboardEnabled(device.settings,port,device.splitInput,true))) {
+        const auto assign=[&](std::uint32_t button,std::uint8_t force) {
+            // Authored button labels 134..141 are Cross, Triangle, Square,
+            // Circle, L1, R1, L2, R2. Honor the user's physical SDL binding.
+            constexpr Ps2Button buttons[]={Ps2Button::Cross,Ps2Button::Triangle,Ps2Button::Square,
+                Ps2Button::Circle,Ps2Button::L1,Ps2Button::R1,Ps2Button::L2,Ps2Button::R2};
+            if(button<134 || button>141)return;
+            const auto& binding=profile.buttons[static_cast<std::size_t>(buttons[button-134])];
+            if(binding.kind==NativeBindingKind::AxisPositive && binding.index>=4 && binding.index<=5)
+                strength[static_cast<std::size_t>(binding.index-4)]=force;
+        };
+        assign(throttle,80);
+        assign(brake,145);
+    }
+    device.catalog.SetDualSenseTriggers(device.selectedKeys[index],strength[0],strength[1]);
+}
+std::wstring_view WindowsInputDevice::DualSenseSpeakerContainer(std::int32_t& volume)
+{
+    // The game has one shared dispatch channel. Use the first enabled
+    // local seat that exposes the controller's own USB audio device.
+    for(std::int32_t port=0;port<2;++port) {
+        if(port && !storage_->splitInput)break;
+        const auto index=static_cast<std::size_t>(port);
+        if(!HasDualSense(port) || !storage_->settings.profiles[index].policeRadioSpeaker)continue;
+        if(const auto container=storage_->catalog.DualSenseSpeakerContainer(storage_->selectedKeys[index]);
+            !container.empty()) {
+            volume=storage_->previewRadioVolume[index].value_or(storage_->settings.profiles[index].policeRadioVolume);
+            return container;
+        }
+    }
+    return {};
+}
+void WindowsInputDevice::PreviewDualSenseVolume(std::int32_t port,std::optional<std::int32_t> volume) noexcept
+{
+    if(port>=0 && port<2)storage_->previewRadioVolume[static_cast<std::size_t>(port)]=volume;
+}
+void WindowsInputDevice::BeginBindingCapture(std::int32_t port) noexcept
+{
+    if(port>=0 && port<2) {
+        storage_->capturePort=port;
+        storage_->captureReady=false;
+        storage_->waitForRelease=false;
+        storage_->capturedKey=0;
+    } else if(storage_->capturePort>=0)storage_->waitForRelease=true;
+}
+std::uint16_t WindowsInputDevice::CapturedKey() const noexcept {return storage_->capturedKey;}
 int32_t WindowsInputDevice::ReadInput(int32_t port,JoystickControls& destination)
 {
     if(port<0 || port>=2)return 0;
@@ -1254,10 +1687,62 @@ int32_t WindowsInputDevice::ReadInput(int32_t port,JoystickControls& destination
         RecordSessionEvent("input.device",detail);
     }
     const std::array<bool,256> blocked{};
-    const auto& keys=device.prepared.keyboardCaptured?blocked:device.prepared.keys;
-    const auto state=NativeInputState(device.settings,port,pad,keys,device.prepared.focused);
+    const auto& rawKeys=device.prepared.keyboardCaptured?blocked:device.prepared.keys;
+    const bool enabled=device.prepared.focused && !device.inputBlocked;
+    const auto& settings=device.settings;
+    const bool keyboard=NativeKeyboardEnabled(settings,port,device.splitInput,pad.connected);
+    const auto other=static_cast<std::size_t>(1-port);
+    const bool sharedKeyboard=device.splitInput && !device.menuInput && keyboard &&
+        NativeKeyboardEnabled(settings,1-port,true,device.prepared.pads[other].connected);
+    std::array<bool,256> seatKeys;
+    if(sharedKeyboard) {seatKeys=rawKeys;FilterNativeSharedKeyboardKeys(settings,port,seatKeys);}
+    const auto& keys=sharedKeyboard?seatKeys:rawKeys;
+    // A single authored scanner configuration interprets a port. Mixing
+    // keyboard layout A with a pad in another scheme turns key bits into
+    // different actions. Pass only the active driving device; menus remain shared.
+    const bool keyboardDriving=!device.menuInput && keyboard &&
+        (device.keyboardLast[index] || !pad.connected);
+    auto state=device.menuInput?NativeMenuInputState(settings,port,pad,keys,enabled,device.splitInput && !device.replayInput):
+        NativeInputState(settings,port,keyboardDriving?NativePadSample{}:pad,
+            keyboardDriving?keys:blocked,enabled,true,device.splitInput);
+    for(std::size_t i=0;i<settings.zoneKeys[index].size();++i) {
+        auto& held=device.zoneHeld[index][i];
+        const auto key=settings.zoneKeys[index][i];
+        held=enabled && keyboardDriving && key && key<keys.size() && keys[key]?
+            std::min(held+1,3):0;
+        if(held)SetButton(state,Ps2Button::Triangle,true);
+        if(held==3)SetButton(state,i?Ps2Button::R2:Ps2Button::L2,true);
+    }
+    if(enabled && port==0 && keys[VK_ESCAPE] && device.escapeEdge) {
+        const auto button=device.escapeStartedInGame?Ps2Button::Start:Ps2Button::Triangle;
+        SetButton(state,button,true);
+    }
+    if(enabled && port==0 && device.replayInput && keys['C'])SetButton(state,Ps2Button::Triangle,true);
     if(!state.connected)return 0;
-    destination=NativeScannerControls(state);return 1;
+    destination=NativeScannerControls(state);
+    destination.keyboardDrivingLayout=keyboardDriving;
+    destination.nativeHostInput=1;
+    destination.nativeMenuInput=device.menuInput;
+    if(enabled && port==0 && !device.menuInput && applicationDebugToolsEnabled) {
+        const auto button=[](Ps2Button value) {return static_cast<std::uint16_t>(1u<<static_cast<unsigned>(value));};
+        const auto debug=NativeMenuInputState(settings,0,{},keys,true,false);
+        destination.nativeDebugInput=1;
+        destination.nativeDebugHeld=debug.held;
+        std::copy(debug.sticks.begin(),debug.sticks.end(),destination.nativeDebugSticks);
+        // A press used for Back can remain held when driving input returns.
+        // Only an Esc that began as Pause may reach the debug Start handler.
+        if(keys[VK_ESCAPE] && device.escapeStartedInGame)destination.nativeDebugHeld|=button(Ps2Button::Start);
+        if(pad.connected && NativeGamepadEnabled(settings,0)) {
+            static const NativeInputSettings defaultControls;
+            const auto debugPad=pad.standardized?NativeInputState(defaultControls,0,pad,blocked,true):state;
+            destination.nativeDebugHeld|=debugPad.held;
+            std::copy(debugPad.sticks.begin(),debugPad.sticks.end(),destination.nativeDebugSticks);
+        }
+        // Keep the designated gameplay Pause action available when debug's
+        // physical Start/Back chord is not being used.
+        if(!keys[VK_ESCAPE])destination.nativeDebugHeld|=state.held&button(Ps2Button::Start);
+    }
+    return 1;
 }
 void WindowsInputDevice::SetRumble(int32_t port,uint8_t smallMotor,uint8_t large)
 {

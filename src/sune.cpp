@@ -33,7 +33,7 @@ bool SunResources::LoadChunk(const std::vector<std::uint8_t>& owner,const Chunk&
 
     // PAL124FB8..125160 initializes the persistent CPU flare state even
     // for an unsupported resource version. No GPU object is manufactured.
-    mode_=2;flares_={};
+    mode_=2;flares_={};visibleSunSamples_=0;
     flares_[0]={0,1,1.0f,60.0f,{0,0},{255,200,100,128},0,0};
     flares_[1]={0,1,0.5f,320.0f,{0,0},{130,159,122,128},0,0};
     flares_[2]={2,1,0.7f,800.0f,{-9.0f,28.0f},{159,122,75,128},0,0.2f};
@@ -164,10 +164,13 @@ void SunResources::StuffSunGlare(const CarCinematicScreen& view,EcstasyFrame& fr
     // PAL125918..125F6C source controls and envelope; the native clock
     // adaptation below preserves its duration across presentation rates.
     auto& state=glare_;
-    if(state.reset) {state.timer=0;state.start=0;state.reset=0;}
     const auto timerActive=[](std::int32_t timer){return timer!=0 && timer!=INT32_MAX;};
-    if(state.start && static_cast<float>(clock.realTimer)*0.0002500000118743628f>0.0f && !timerActive(state.timer)) {
-        state.start=0;state.timer=clock.realTimer;state.phase=0;
+    const bool advance=frame.AdvancesPresentation();
+    if(advance) {
+        if(state.reset) {state.timer=0;state.start=0;state.reset=0;}
+        if(state.start && clock.realTimer>0 && !timerActive(state.timer)) {
+            state.start=0;state.timer=clock.realTimer;state.phase=0;
+        }
     }
     if(!timerActive(state.timer))return;
     static constexpr std::uint32_t durationTicks[]={200,800,2600};
@@ -177,18 +180,21 @@ void SunResources::StuffSunGlare(const CarCinematicScreen& view,EcstasyFrame& fr
     // PC presentation can cross several phases in one frame. Keep the
     // released 50/200/650ms envelope on the clock, retaining the remainder
     // instead of stretching it by resetting each phase to the draw time.
-    while(state.phase<3 && elapsedTicks>=durationTicks[state.phase]) {
+    while(advance && state.phase<3 && elapsedTicks>=durationTicks[state.phase]) {
         const auto duration=durationTicks[state.phase];
         elapsedTicks-=duration;
         const auto next=static_cast<std::uint32_t>(state.timer)+duration;
         std::memcpy(&state.timer,&next,sizeof(next));
         ++state.phase;
     }
+    if(state.phase==3) {
+        if(advance)state.timer=0;
+        return;
+    }
     float size=0.0f,fade=1.0f;
     if(state.phase==0)size=static_cast<float>(elapsedTicks)/static_cast<float>(durationTicks[0]);
     else if(state.phase==1)size=1.0f;
     else if(state.phase==2) {size=1.0f;fade=1.0f-static_cast<float>(elapsedTicks)/static_cast<float>(durationTicks[2]);}
-    else {state.timer=0;size=0.0f;fade=0.0f;}
     Require(view.view,"Sun glare has no original camera");
     float point[4];
     for(std::size_t axis=0;axis<3;++axis)
@@ -223,15 +229,10 @@ void SunResources::StuffSun(const CarCinematicScreen& view,EcstasyFrame& frame,
     const auto projected=ProjectSun(view,position,authored,glare_.positionOverride);
     if(!projected.visible)return;
     const auto targetIndex=static_cast<std::size_t>(view.target->id);
-    auto& samples=DepthSamples(targetIndex);
-    const auto consumedBounds=samples.bounds;
-    float visible=0.0f;
-    for(auto y=samples.bounds[2];y<samples.bounds[3];++y)
-        for(auto x=samples.bounds[0];x<samples.bounds[1];++x) {
-            Require(x>=0 && x<32 && y>=0 && y<32,"Sun retained sample bounds leave their32-square tile");
-            if((samples.values[static_cast<std::size_t>(y*32+x)]&0x00ffffffu)<2u)visible+=1.0f;
-        }
-    visible*=0.0009765625f;
+    if(frame.AdvancesPresentation())
+        Require(EcstasyNativeSunVisibleSampleCount(DepthSamples(targetIndex),visibleSunSamples_),
+            "Sun retained sample bounds leave their32-square tile");
+    const float visible=static_cast<float>(visibleSunSamples_)*0.0009765625f;
     const float maximum=view.target->format==0x31 ? 16777215.0f:65535.0f;
     for(std::size_t index=0;index<authored.size();++index) {
         const auto& row=authored[index];const auto* descriptor=TrackTexture(static_cast<std::size_t>(row.kind));
@@ -260,7 +261,7 @@ void SunResources::StuffSun(const CarCinematicScreen& view,EcstasyFrame& frame,
     if(sourceWidth-33<x) {left=(x+1)-(sourceWidth-32);x=sourceWidth-33;}
     if(y<0) {bottom=y+32;y=0;}
     if(sourceHeight-33<y) {top=(y+1)-(sourceHeight-32);y=sourceHeight-33;}
-    samples.bounds={{left,right,top,bottom}};
-    if(inGame)frame.TransferZBufferRect(RetainDepthSamples(targetIndex),view,x,y,32,32,step,&consumedBounds);
+    const std::array<std::int32_t,4> sampleBounds{{left,right,top,bottom}};
+    if(inGame)frame.TransferZBufferRect(RetainDepthSamples(targetIndex),view,x,y,32,32,step,&sampleBounds);
 }
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include "FlailerChunks.hpp"
 #include "FEAnim.hpp"
@@ -12,6 +13,8 @@ GameInputResult flailerFrontendDispatchInput(FlailerFrontendInput* input,int32_t
 #ifdef __cplusplus
 }
 namespace hp2::frontend { struct FlailerScreenList; }
+namespace hp2 {class NativeApplicationHost; struct NativePcSettings;}
+namespace hp2::frontend {class MemcardScreens;}
 struct FlailerFrontendInput {
     GameInputRouter* router{};
     hp2::frontend::FlailerScreenList* screens{};
@@ -245,6 +248,8 @@ struct FlailerScreenList {
     FlailerNewSongMonitor newSongMonitor;
     const CarSoundBindings* soundBindings{};
     FlailerLoadingScreenAnimation* loadingAnimation{};
+    FlailerScreenNode* sliderDragScreen{};
+    std::uint32_t sliderDragBar{};
 
     void SetMainScreen(const char* name);
     FlailerScreenNode* FindScreen(std::int32_t screenId);
@@ -257,6 +262,7 @@ struct FlailerScreenList {
     void ChangeToScreen(const char* name,bool push);
     bool MoveToPreviousScreen(std::int32_t count,bool consultCallback,std::int32_t port);
     void AddNormalMenuJoyHandlers();
+    void HandlePointer(float x,float y,bool pressed,std::int32_t wheel,bool held=false);
     void RemoveNormalMenuJoyHandlers();
     void JoyHandler(std::int32_t port,std::int32_t event,std::uint8_t value);
     void RenderModels(bool advanceState=true);
@@ -303,6 +309,9 @@ struct MainMenuScreenServices {
     const FrontendRaceSetupBindings* raceSetup{};
     const ::CarSoundBindings* sounds{};
     FrontendDemoMode* demoMode{};
+    NativeApplicationHost* pcHost{};
+    MemcardScreens* profiles{};
+    std::function<void(const NativePcSettings&)> applyPcDisplay;
 };
 // Actual source GP-C0FC main-menu screen lifetime. Bindings borrow existing
 // services; activation owns one concrete NewMainMenu, never a second FRED.
@@ -364,6 +373,7 @@ private:
 void BindFrontendStartup(FrontendStartupServices& services);
 void UnbindFrontendStartup();
 void TitleScreenCallback(ScreenMessage message,ScreenCallbackData* data);
+bool CanUseFrontendPointer(const FlailerScreenList& screens) noexcept;
 void MumboJumboCallback(ScreenMessage message,ScreenCallbackData* data);
 void CallbackFinishedLegalScreen();
 void CallbackFinishedAntiPiracyScreen();
@@ -495,6 +505,8 @@ void BindOptionsScreen(MainMenuScreenServices& services);
 void UnbindOptionsScreen();
 
 struct FlailerSlider {
+    static constexpr float VolumeStep=0.05f;
+    static float VolumeAtPointer(std::int32_t position) noexcept;
     float displayScale{1.0f};
     FlailerUiState* ui{};
     std::uint32_t screenKey{};
@@ -508,12 +520,18 @@ struct FlailerSlider {
     tCubic1D position{};
     FlailerSlider()=default;
     FlailerSlider(FlailerUiState& state,std::uint32_t screen,std::uint32_t menuItem,
+        std::uint32_t bounds,std::uint32_t thumb,float initial);
+    FlailerSlider(FlailerUiState& state,std::uint32_t screen,std::uint32_t menuItem,
         std::uint32_t bounds,std::uint32_t thumb,std::int32_t audioChannel,
         float* value,float minimum,float maximum);
     float ValueToDisplay(float value) const;
     float DisplayToValue(float value) const;
     void StepValue(float step,bool updateMixer);
+    void SetDisplayValue(float displayed,bool updateMixer,bool snap=false);
+    void ShowValue(float displayed,bool snap=false);
+    void PlayChange(float gain=1.0f);
     void Animate();
+    void PlaceThumb();
 };
 
 // SelectionSet borrows the actual object nodes in the loaded screen. The
@@ -595,7 +613,8 @@ enum class ScreenMessage : std::int32_t {
     Left=6,Right=7,Previous=8,Next=9,ItemEvent=10,
     ScreenActivate=11,ScreenDeactivate=12,ScreenBack=13,ScreenEvent8=14,
     ScreenEvent13=15,ScreenEvent15=16,LeaveScreen=17,Tick=18,RenderModels=19,
-    PopupActivate=20,PopupDismiss=21,PopupPrevious=22,PopupNext=23,Input=24
+    PopupActivate=20,PopupDismiss=21,PopupPrevious=22,PopupNext=23,Input=24,Pointer=25,
+    SliderDrag=26,SliderCommit=27
 };
 
 // The source callback payload is four words and is message-specific. Keep
@@ -669,6 +688,10 @@ struct FlailerScreenConfig {
     std::int32_t screenCount{};
     const std::int32_t* helpItems{};
 };
+std::array<FlailerScreenConfig,11>& NativeOptionsScreenConfigurations();
+void OpenStartupProfileMenu(MainMenuScreenServices& services);
+constexpr std::int32_t NativeMenuExitResult=1000;
+bool RequestNativeMenuExit(MainMenuScreenServices& services);
 
 // The RAII owners below create the same menu/item rings used by the original
 // methods; they do not mirror current selection or object color.
@@ -820,6 +843,14 @@ public:
     MemcardScreens& operator=(const MemcardScreens&)=delete;
     LoadResult LoadProfile();
     bool SaveProfile();
+    const std::string& ActiveProfile() const noexcept;
+    std::vector<std::string> Profiles() const;
+    std::string ProfileName(const std::string& profile) const;
+    bool CreateProfile(std::string name);
+    bool SelectProfile(const std::string& profile);
+    bool DeleteProfile(const std::string& profile);
+    bool ChoosingAtStartup() const noexcept;
+    bool SaveProfileControls(const NativePcSettings& settings);
     bool RequestAutosave(std::function<void()> completed);
     void Service();
     bool Busy() const noexcept;
@@ -852,6 +883,18 @@ std::array<FlailerScreenConfig,7>& RaceSetupScreenConfigurations();
 
 namespace hp2::frontend {
 void BindNameEntryScreen(MainMenuScreenServices&);
+class NativeProfileNameEditor final {
+public:
+    enum class Result {Editing,Accept,Cancel};
+    NativeProfileNameEditor(MainMenuScreenServices& services,std::uint32_t screen,float rowY,bool gridAbove);
+    ~NativeProfileNameEditor();
+    Result HandleEvent(ScreenMessage message,ScreenCallbackData& data);
+    bool GridVisible() const noexcept;
+    std::string Name() const;
+private:
+    struct Storage;
+    std::unique_ptr<Storage> storage_;
+};
 void UnbindNameEntryScreen();
 void NameEntryScreenCallback(ScreenMessage,ScreenCallbackData*);
 extern FlailerScreenConfig fNameEntry;

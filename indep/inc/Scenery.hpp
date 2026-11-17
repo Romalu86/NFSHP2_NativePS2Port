@@ -137,6 +137,7 @@ std::size_t sceneryNativeSelectDetailLod(const SceneryModel& model,
 
 struct SceneryNativeRenderStatistics {
     std::size_t sourceSections{},extendedSections{},duplicateExtendedInstances{},drawnInstances{};
+    std::size_t reusedCommands{};
 };
 class SceneryResources final {
 public:
@@ -153,9 +154,11 @@ public:
     std::vector<std::int16_t> WhatSectionsShouldWeDraw(const CarCinematicScreen& view,
         std::size_t capacity=128);
     void Render(const CarCinematicScreen& view,EcstasyFrame& frame,std::uint32_t viewMask,
-        std::int32_t worldFrames);
+        std::int32_t worldFrames,bool retainPausedView=false,bool emitGeometry=true);
 private:
     struct SectionStorage;
+    struct PausedView;
+    std::array<std::unique_ptr<PausedView>,10> pausedViews_;
 
     // Render() is consumed serially by PAL's ten-view scene scheduler. Keep
     // transient CPU culling/draw lists attached to the live track instead of
@@ -180,6 +183,11 @@ private:
     std::vector<RenderNode> nodeScratch_;
     std::vector<RenderSectionCapture> sectionCaptureScratch_;
     std::vector<std::optional<SceneLightContext>> lightContextScratch_;
+    struct PreparedVisibility {
+        const EditorMarkerSolid* solid{};
+        std::vector<EcstasyVisibleStrip> strips;
+    };
+    std::vector<PreparedVisibility> stripVisibilityScratch_;
     std::vector<std::int16_t> sectionScratch_;
     // Exact selected-solid / current native matrix / animation and material
     // bindings. A generation table reuses one allocation between extended

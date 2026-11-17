@@ -662,7 +662,9 @@ int32_t physicsCarRestState(const PhysicsCar* car)
 {
     const RigidBody* body = car->body;
     const VehicleState* state = car->state;
-    if (0.30000001192092896f < car->controls->throttle && state->activeContactCount > 0)
+    // Leave the parked state as soon as an analog pedal requests drive torque.
+    if (state->activeContactCount > 0 &&
+        (car->engine->proportionalLaunchWeight > 0.0f || 0.30000001192092896f < car->controls->throttle))
         return 0;
     const float linearSpeed = sqrtf(dotThree(body->linearVelocity, body->linearVelocity));
     const float angularSpeed = sqrtf(dotThree(body->angularVelocity, body->angularVelocity));
@@ -997,6 +999,14 @@ float physicsCarMove(PhysicsCar* car, float elapsed)
     }
     steeringSetAngle(car->steering, controls->steeringAngle);
     engineSetThrottle(car->engine, controls->throttle);
+    // At pull-away the original clutch and engine braking can absorb all
+    // torque from a light squeeze. Ease off that braking at walking speed,
+    // while keeping the requested engine torque proportional to the pedal.
+    const float travelSpeed=controls->gearRequest==0?-state->forwardSpeed:state->forwardSpeed;
+    car->engine->proportionalLaunchWeight =
+        car->ownerMotion->inputCategory==CAR_DRIVER_REAL && controls->proportionalThrottle &&
+        controls->throttle>0.0f && *environment->raceStage==4 ?
+            std::clamp((5.0f-travelSpeed)/3.0f,0.0f,1.0f) : 0.0f;
     driveTrainSetShiftTarget(car->driveTrain, controls->shiftTarget);
     if (controls->nitroRequest) {
         engineSetNitroEnabled(car->engine, 1);
@@ -1008,7 +1018,7 @@ float physicsCarMove(PhysicsCar* car, float elapsed)
                                                           environment->clock->worldTimeElapsed);
     controls->shiftTarget = car->driveTrain->shiftTarget;
     rigidBodySetDampingEnabled(car->body,
-        !(0.30000001192092896f < controls->throttle ||
+        !(car->engine->proportionalLaunchWeight>0.0f || 0.30000001192092896f < controls->throttle ||
           (state->activeContactCount == 4 && 0.15000000596046448f < fabsf(state->orientation[2]))));
     float grip = car->gripScale;
     if (state->pursuitMode == 0) grip = grip * tuning->nonPursuitGripScale;

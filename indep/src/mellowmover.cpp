@@ -5,6 +5,7 @@
 #include "bware/inc/bMath.hpp"
 #include "bware/inc/bMath.hpp"
 
+#include <algorithm>
 #include <math.h>
 #include <cmath>
 #include <string.h>
@@ -57,8 +58,13 @@ static void saveComponent(void* object, float* output)
 { memcpy(output, &((Mellovator*)object)->motion, sizeof(MellovatorState)); }
 static void restoreComponent(void* object, const float* input)
 { memcpy(&((Mellovator*)object)->motion, input, sizeof(MellovatorState)); }
+static float* mellovatorDerivativesForStep(const Mellovator* component, float derivatives[4], float elapsed);
 static void componentDerivatives(void* object, const void* context, float* output)
-{ (void)context; mellovatorComputeDerivatives((Mellovator*)object, output); }
+{
+    const auto* environment=static_cast<const PhysicsCarEnvironment*>(context);
+    mellovatorDerivativesForStep(static_cast<Mellovator*>(object),output,
+        environment->stepContext->lastSubstepElapsed);
+}
 static void prepareComponent(void* object, const void* context)
 {
     const PhysicsCarEnvironment* environment = (const PhysicsCarEnvironment*)context;
@@ -313,10 +319,9 @@ float mellowMoverMove(MellowMover* mover, float elapsed)
     for (int32_t index = 0; index < steps; ++index) {
         mover->environment->stepContext->lastSubstepElapsed = step;
         componentSystemIntegrateEuler(&mover->components, step, mover->derivatives, 33);
+        // PAL 219E50–219E64 builds the angular cache during Euler integration,
+        // then normalizes the orientation used by the next substep.
         motionMatrixOrthonormalize(mover->body->motion.orientation, mover->body->motion.orientation);
-        // The integrator prepared omega before this normalization. Refresh its
-        // angular cache without discarding the forces already collected.
-        rigidBodyRefreshAngularVelocity(mover->body);
     }
     mellowMoverPublishState(mover, elapsed);
     return elapsed;
@@ -405,13 +410,15 @@ void mellovatorCalibrate(Mellovator* component, float downforce, int useCenterOf
 
 
 
-float* mellovatorComputeDerivatives(const Mellovator* component, float derivatives[4])
+static float* mellovatorDerivativesForStep(const Mellovator* component, float derivatives[4], float elapsed)
 {
     static const CurveKey keys[] = {{0.0f, 0.30000001192092896f}, {20.0f, 0.5f}};
     const KeyedCurve damping = {keys, 2};
     const float speed = bScalarSquareRoot(dotThree(component->body->linearVelocity, component->body->linearVelocity));
+    constexpr float inverseWheelInertia=124.99999237060547f;
     for (int wheel = 0; wheel < 4; ++wheel) {
         float torque = 0.0f;
+        float implicitFactor=1.0f;
         if (!component->rotationLocked[wheel]) {
             if (wheel >= 2) {
                 const float rpm = bScalarDivide(component->engineRpm, component->boost);
@@ -437,11 +444,46 @@ float* mellovatorComputeDerivatives(const Mellovator* component, float derivativ
             float resistance = keyedCurveEvaluate(&damping, speed);
             if (wheel >= 2) resistance = bScalarDivide(resistance, bScalarMultiply(longitudinalScale, dampingScale));
             torque = bScalarAdd(bScalarMultiply(torque, longitudinalScale), braking);
-            torque = bScalarAdd(torque, -bScalarMultiply(component->tireForce[wheel][0], resistance));
+            float tireForce=component->tireForce[wheel][0];
+            if (elapsed>0.0f && component->touchingGround[wheel] && component->suspensionForce[wheel]>0.0f) {
+                const float radius=component->info.wheels[wheel].mountPosition[3];
+                const float slip=component->slip[wheel][0];
+                const float lateral=component->slip[wheel][1];
+                const float loadScale=component->suspensionForce[wheel]*1.25f;
+                const float brakeSlope=angular<20.0f ? component->brake*0.5f:0.0f;
+                const auto steering=wheel<2 ? component->steeringAngle:0u;
+                const bool reversed=steering>0x4000u && steering<0xC000u;
+                const float greatestGrip=maximumFinite(1.0f,component->frictionBoost*0.25f);
+                const float worstStep=elapsed*inverseWheelInertia*(brakeSlope+resistance*radius*loadScale*greatestGrip);
+                if (reversed || worstStep>=2.0f) {
+                    const float grip=std::hypot(slip,lateral)>component->frictionBoost*0.05f ?
+                        component->frictionBoost*0.25f:1.0f;
+                    float projection=1.0f;
+                    if (reversed) {
+                        // Wheel spin reacts to longitudinal force in its own frame.
+                        // Chassis-X changes sign beyond a quarter turn after an impact.
+                        const float frictionBudget=component->suspensionForce[wheel]*1000.0f*component->frictionBoost;
+                        tireForce=std::clamp(-slip*grip*loadScale,-frictionBudget,frictionBudget);
+                    } else if (steering!=0u) {
+                        const float angle=static_cast<float>(steering)*0.0000958738019107841f;
+                        projection=rotationSineRadians(angle+1.5707964897155762f);
+                    }
+                    const float feedback=elapsed*inverseWheelInertia*(brakeSlope+resistance*radius*loadScale*grip*projection);
+                    // Keep ordinary PAL Euler steps, but solve stiff linear wheel feedback implicitly.
+                    if (feedback>=2.0f) implicitFactor=1.0f+feedback;
+                }
+            }
+            torque = bScalarAdd(torque, -bScalarMultiply(tireForce, resistance));
         }
-        derivatives[wheel] = bScalarMultiply(torque, 124.99999237060547f);
+        const float derivative=bScalarMultiply(torque,inverseWheelInertia);
+        derivatives[wheel]=implicitFactor==1.0f ? derivative:derivative/implicitFactor;
     }
     return derivatives;
+}
+
+float* mellovatorComputeDerivatives(const Mellovator* component, float derivatives[4])
+{
+    return mellovatorDerivativesForStep(component,derivatives,0.0f);
 }
 
 void mellovatorGroundHeightsAndPositions(Mellovator* component, float positions[4][4], float heights[4])
@@ -623,13 +665,14 @@ void mellovatorResolveForces(Mellovator* component)
         }
         float force[4];
         vectorMatrixTransformPoint(force, frame, localForce);
+        float tireScale=1.0f;
         if (component->touchingGround[wheel]) {
             const float magnitude = bScalarSquareRoot(bScalarAdd(bScalarMultiply(force[0],force[0]),bScalarMultiply(force[1],force[1])));
             const float limit = bScalarMultiply(bScalarMultiply(component->suspensionForce[wheel],1000.0f),component->frictionBoost);
             if (limit < magnitude) {
-                const float scale = bScalarDivide(limit,magnitude);
-                force[0] = bScalarMultiply(force[0],scale);
-                force[1] = bScalarMultiply(force[1],scale);
+                tireScale=bScalarDivide(limit,magnitude);
+                force[0] = bScalarMultiply(force[0],tireScale);
+                force[1] = bScalarMultiply(force[1],tireScale);
             }
             float boost = bScalarAdd(component->boost,-1.0f);
             boost = 0.0f < boost ? bScalarAdd(bScalarMultiply(boost,2.5f),1.0f) : 1.0f;
@@ -648,8 +691,9 @@ void mellovatorResolveForces(Mellovator* component)
             }
         }
         rigidBodyApplyForce(body, force, worldLever);
-        component->tireForce[wheel][0] = localForce[0];
-        component->tireForce[wheel][1] = localForce[1];
+        // The wheel must react to the same limited traction used by the chassis.
+        component->tireForce[wheel][0] = bScalarMultiply(localForce[0],tireScale);
+        component->tireForce[wheel][1] = bScalarMultiply(localForce[1],tireScale);
     }
 }
 

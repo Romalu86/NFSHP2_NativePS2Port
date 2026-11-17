@@ -378,10 +378,10 @@ void ResultDriverColumns(std::uint32_t screen,std::int32_t row,std::int32_t driv
     const auto* player=driver.driverClass==1?ResultPlayer(driver.driverNumber):nullptr;
     const auto& color=player?endGamePlayerColors.at(static_cast<std::size_t>(player->movement.seat)):endGameOpponentColor;
     resources.Printf(screen,pos,"%2d",position);
-    resources.Printf(screen,name,"%s",player?player->settings.playerName:RaceDriverName(driver));
     Require(ResultsSetup().cars,"Results row has no canonical car catalogue");
     const auto& car=ResultsSetup().cars->Car(static_cast<std::size_t>(driver.appearance.modelCode));
     resources.Printf(screen,type,"%s",GetTranslatedString(*ui.language,car.GetFullName(*ui.language)));
+    resources.SetFittedText(screen,name,ui.language,player?player->settings.playerName:RaceDriverName(driver),type);
     for(const auto key:{pos,name,type,fourth}){resources.SetObjectVisibility(screen,key,1);ResultColor(screen,key,color);}
 }
 void ResultHideRow(std::uint32_t screen,std::int32_t row,const std::initializer_list<const char*>& columns)
@@ -662,9 +662,9 @@ void BuildBestTimes(std::uint32_t screen,bool total)
         for(const auto key:{pos,name,type,time})resources.SetObjectVisibility(screen,key,valid);
         if(!valid)continue;
         resources.Printf(screen,pos,"%2d",row);
-        resources.Printf(screen,name,"%s",frontend.RecordPlayerName(record.playerNameIndex));
         const auto& car=ResultsSetup().cars->Car(static_cast<std::size_t>(record.modelCode));
         resources.Printf(screen,type,"%s",GetTranslatedString(*ui.language,car.GetFullName(*ui.language)));
+        resources.SetFittedText(screen,name,ui.language,frontend.RecordPlayerName(record.playerNameIndex),type);
         const auto text=PrintTimeToString(record.ticks,false);resources.Printf(screen,time,"%s",text.c_str());
         const auto player=WhichPlayerSetRecord(&record,total);
         const auto& color=player==-1?endGameOpponentColor:endGamePlayerColors.at(static_cast<std::size_t>(player));
@@ -735,12 +735,13 @@ class LapTimesDisplay final {
 public:
     explicit LapTimesDisplay(std::uint32_t screen):screen_(screen)
     {
-        ResultTrackCaption(screen);auto& resources=*ResultsUi().resources;
+        ResultTrackCaption(screen);auto& ui=ResultsUi();auto& resources=*ui.resources;
         const auto* first=ResultPlayer(0);if(!first)first=ResultPlayer(1);if(!first)return;
-        resources.Printf(screen,0x6dbbc830u,"%s",first->settings.playerName);
+        resources.SetFittedText(screen,0x6dbbc830u,ui.language,first->settings.playerName,
+            ResultsParameters().mode==2?0x6dbbc831u:0u);
         if(ResultsParameters().mode==2) {
             const auto* second=ResultPlayer(1);if(!second)return;
-            resources.Printf(screen,0x6dbbc831u,"%s",second->settings.playerName);
+            resources.SetFittedText(screen,0x6dbbc831u,ui.language,second->settings.playerName);
         }
         const auto& stats=ResultsFrontend().transientStats;
         const auto* left=stats.GetDriver(0);const auto* right=stats.GetDriver(1);

@@ -2,6 +2,7 @@
 #include "CarSounds.hpp"
 #include "indep/inc/Collision.hpp"
 #include "indep/inc/AICarController.hpp"
+#include "indep/inc/CarInfo.hpp"
 #include "bware/inc/bMath.hpp"
 #include "indep/inc/Table.hpp"
 #include "bware/inc/bMath.hpp"
@@ -240,9 +241,17 @@ void aiControlsUpdate(AIControls* controls,float elapsed)
     float angleDegrees;
     if (frontContact) {
         const float limit=limitedHandling ? clamp(sampledCurveEvaluate(&steeringLimitCurve,signedSpeed),0,45):45;
-        const float previous=currentSteering/limit;
+        const Car* owner=movement->bindings.owner;
+        const bool restoredTraffic=limitedHandling && owner && owner->driverInfo &&
+            hp2::IsRestoredTrafficModel(owner->driverInfo->appearance.modelCode);
+        const float steeringScale=movement->info.steeringRangeDegrees;
+        // The previous command is already scaled at output. Undo that scale
+        // before rate limiting the restored traffic, so a 1.5x BUS steering
+        // range cannot multiply over successive ticks and reverse tire force.
+        const float previous=restoredTraffic ?
+            clamp(currentSteering/(limit*steeringScale),-1.0f,1.0f):currentSteering/limit;
         float requested=steering/(limit*.01745329424738884f);
-        if (!overshoot && limitedHandling) requested=clamp(requested,-1,1);
+        if (restoredTraffic || (!overshoot && limitedHandling)) requested=clamp(requested,-1,1);
         float change=requested-previous;
         if (limitedHandling || !overshoot) {
             float rate=sampledCurveEvaluate(&steeringRateCurve,signedSpeed)*.5f;
@@ -250,7 +259,7 @@ void aiControlsUpdate(AIControls* controls,float elapsed)
             change=clamp(change,-rate*interval,rate*interval);
         }
         angleDegrees=(previous+change)*limit;
-        if (limitedHandling) angleDegrees*=movement->info.steeringRangeDegrees;
+        if (limitedHandling) angleDegrees*=steeringScale;
     } else angleDegrees=steering*57.2957763671875f;
     controls->targetDuration-=elapsed;if (controls->targetDuration<0) controls->targetDuration=0;
     output->throttle=controls->enabled ? throttle:0;output->brake=controls->enabled ? brake:0;

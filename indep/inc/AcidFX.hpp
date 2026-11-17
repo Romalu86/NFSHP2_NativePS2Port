@@ -94,6 +94,7 @@ typedef struct ChopperMunitionEffects {
     WorldServicesResult result;
     WorldParticleSystem* particles;
     size_t droppedRequests;
+    size_t droppedAutoEmitters;
 } ChopperMunitionEffects;
 
 void chopperEffectsInitialize(ChopperMunitionEffects* effects,
@@ -205,6 +206,7 @@ struct WorldParticleSystem {
     size_t particleCapacity;
     WorldParticleGroup* groupStorage;
     size_t groupCapacity;
+    const struct WorldParticleSystem* sharedPoolPeer;
     uint32_t* randomState;
     const CarCinematicServices* cameras;
     float interestPoints[3][4];
@@ -214,7 +216,19 @@ struct WorldParticleSystem {
     uint32_t particleCount;
     uint32_t groupCount;
     uint64_t droppedParticles;
+    // Native diagnostics: a full shared group pool previously dropped a
+    // visual emitter silently. Does not change the original pool policy.
+    uint64_t droppedGroups;
+    uint64_t outOfInterestEmissions;
+    uint32_t lastDroppedParticleEffect;
+    uint32_t lastDroppedGroupEffect;
+    int32_t lastDroppedParticleCar{-1};
+    int32_t lastDroppedGroupCar{-1};
     uint64_t nextGeneration;
+    // Native slot-search cursors. The source lists/ownership and random
+    // sequence stay unchanged; no 0..capacity scan for every spawned quad.
+    size_t nextParticleSlot;
+    size_t nextGroupSlot;
     float stepMilliseconds;
     WorldServicesResult result;
     // Original AcidEffectSystem+40/+4D editor filter; constructor127418
@@ -324,6 +338,7 @@ public:
     void BindCatalogue(ChopperEffectData& catalogue);
     void ReleaseCatalogue(ChopperEffectData& catalogue);
     ChopperMunitionEffects& Emitters();
+    std::uint64_t FrameEmitterDrops() const noexcept;
 private:
     struct Storage;
     std::unique_ptr<Storage> storage_;

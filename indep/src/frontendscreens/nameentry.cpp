@@ -1,4 +1,7 @@
 #include "FMenus.hpp"
+#include "Flags.hpp"
+#include "Language.hpp"
+#include <utility>
 #include "FEAnim.hpp"
 #include "Fred.hpp"
 #include "Timer.hpp"
@@ -67,23 +70,52 @@ public:
             resources.SetObjectVisibility(screen_,NameObjects[player],visible==1?0:1);
         }
         resources.SetObjectVisibility(screen_,0xc01086b5u,visible);
+        if(extendedName_) {
+            resources.SetGroupVisibility(screen_,player==0?0x7b95e55cu:0x7deb0dfdu,0);
+            for(int index=0;index<limit_;++index)
+                resources.SetObjectVisibility(screen_,ProfileCell(index),visible);
+        }
         if (!visible)resources.MoveGroupTo(screen_,0x670b6fddu,0x35b2f256u,
             static_cast<float>(convertFloatToInt32(savedX_)),static_cast<float>(convertFloatToInt32(savedY_)));
     }
-    void Activate(std::int32_t player)
+    void Activate(std::int32_t player,bool newProfile=false)
     {
         Require(player==0 || player==1,"Name keyboard has no authored player slot");
-        player_=player;SetVisible(player_,1);nameObject_=NameObjects[player_];
+        player_=player;profileName_=newProfile;extendedName_=newProfile || services_.pcHost;
+        limit_=extendedName_?PLAYER_NAME_CAPACITY-1:7;
+        if(extendedName_) {
+            auto& resources=*Ui().resources;
+            const auto* first=static_cast<const FlailerTextChunk*>(resources.FindObject(screen_,hashString(player_==0?"P1C1":"P2C1"),1));
+            Require(first,"Profile editor lacks its first authored character");
+            for(int index=0;index<limit_;++index) {
+                auto& cell=resources.CloneNativeText(screen_,*first,ProfileCell(index));
+                cell.parentKey=0;cell.SetTopLeftX(285.0f+15.0f*static_cast<float>(index));
+                cell.SetTopLeftY(profileName_?profileRowY_:first->topLeftY);
+            }
+        }
+        SetVisible(player_,1);nameObject_=NameObjects[player_];
         UpdateCursor();for (auto& axis:cursor_.axes)SnapCurve(axis);
         editPosition_=0;
         slide_.desiredValue=650.0f;slide_.duration=0.5f;slide_.continuous=0;
         SnapCurve(slide_);slide_.desiredValue=savedX_;
         if (slide_.value!=slide_.desiredValue)slide_.mode=2;
         Tick();map_=DefaultMap;edit_.fill(0);
-        CopyNameBytes(edit_.data(),Profile().playerName,7);
+        if(!profileName_)CopyNameBytes(edit_.data(),Profile().playerName,static_cast<std::size_t>(limit_));
         SyncEditWithDisplay();RedrawCharSet();
     }
-    void Unactivate() {SetVisible(player_,0);}
+    void ActivateProfile(float rowY,bool gridAbove)
+    {
+        profileRowY_=rowY+2.0f;
+        profileGridBaseY_=savedY_;
+        if(gridAbove)savedY_=66.0f;
+        Activate(0,true);
+    }
+    void SetGridVisible(bool visible) {Ui().resources->SetGroupVisibility(screen_,0x670b6fddu,visible);}
+    void Unactivate()
+    {
+        if(profileName_)savedY_=profileGridBaseY_;
+        SetVisible(player_,0);
+    }
     float GetColumnX(std::int32_t column) {return GetCenter("CHAR_0%X",column,true);}
     float GetRowY(std::int32_t row) {return GetCenter("CHAR_%X0",row,false);}
     void UpdateCursor()
@@ -116,7 +148,7 @@ public:
     }
     void MoveEditText(std::int32_t direction)
     {
-        editPosition_=std::clamp(editPosition_+direction,0,6);SyncEditWithDisplay();
+        editPosition_=std::clamp(editPosition_+direction,0,extendedName_?limit_:limit_-1);SyncEditWithDisplay();
     }
     char GetChar(std::int32_t row,std::int32_t column) const
     {
@@ -128,33 +160,71 @@ public:
         const auto character=GetChar(row_,column_);
         if (character==')') {data.sound=29;return false;}
         if (character=='(') {data.sound=26;DeleteCharacter();return true;}
+        EnterCharacter(character);
+        data.sound=25;return true;
+    }
+    void EnterCharacter(char character)
+    {
+        const auto size=std::strlen(edit_.data());
+        if(extendedName_) {
+            if(size>=static_cast<std::size_t>(limit_))return;
+            const auto start=std::min(size,static_cast<std::size_t>(editPosition_));
+            std::memmove(edit_.data()+start+1,edit_.data()+start,size-start+1);
+            edit_[start]=character;
+            editPosition_=static_cast<int>(start)+1;
+            SyncEditWithDisplay();return;
+        }
+        for(auto i=size;i<static_cast<std::size_t>(editPosition_);++i)edit_[i]=' ';
         edit_[static_cast<std::size_t>(editPosition_)]=character;
         Ui().resources->Printf(screen_,nameObject_,"%s",edit_.data());
-        MoveEditText(1);data.sound=25;return true;
+        MoveEditText(1);
     }
-    void DeleteCharacter()
+    void DeleteCharacter(bool backspace=false)
     {
-        for (auto i=editPosition_;i<6;++i)edit_[static_cast<std::size_t>(i)]=edit_[static_cast<std::size_t>(i+1)];
-        edit_[6]=' ';edit_[7]=0;
+        if(extendedName_) {
+            const auto size=static_cast<int>(std::strlen(edit_.data()));
+            editPosition_=std::min(editPosition_,size);
+            if(backspace && editPosition_>0)--editPosition_;
+            else if(backspace)return;
+            if(editPosition_<size)
+                std::memmove(edit_.data()+editPosition_,edit_.data()+editPosition_+1,static_cast<std::size_t>(size-editPosition_));
+            SyncEditWithDisplay();return;
+        }
+        if(backspace && editPosition_>0)--editPosition_;
+        for(auto i=editPosition_;i<limit_-1;++i)edit_[static_cast<std::size_t>(i)]=edit_[static_cast<std::size_t>(i+1)];
+        edit_[static_cast<std::size_t>(limit_-1)]=0;
+        edit_[static_cast<std::size_t>(limit_)]=0;
         Ui().resources->Printf(screen_,nameObject_,"%s",edit_.data());
-        SyncEditWithDisplay();MoveEditText(-1);
+        SyncEditWithDisplay();if(!backspace)MoveEditText(-1);
     }
     void SyncEditWithDisplay()
     {
         auto& ui=Ui();
-        for (std::int32_t i=0;i<7;++i) {
+        const auto caretIndex=std::min(editPosition_,limit_-1);
+        for (std::int32_t i=0;i<limit_;++i) {
             char objectName[16];std::snprintf(objectName,sizeof(objectName),"P%dC%d",player_+1,i+1);
-            const auto key=hashString(objectName);
+            const auto key=extendedName_?ProfileCell(i):hashString(objectName);
             ui.resources->Printf(screen_,key,"%c",edit_[static_cast<std::size_t>(i)]);
             auto* object=ui.resources->FindObject(screen_,key);
-            ObjectColor(object,i==editPosition_?0x80004080u:0x80808080u);
-            if (i==editPosition_ && object) {
+            ObjectColor(object,i==caretIndex?0x80004080u:0x80808080u);
+            if (i==caretIndex && object) {
                 float x,y;ui.resources->GetTopLeft(*object,x,y,ui.language);
                 if (auto* caret=ui.resources->FindObject(screen_,0xc01086b5u)) {
                     caret->SetTopLeftX(x);
                     caret->SetTopLeftY(y+static_cast<float>(convertFloatToInt32(ObjectHeight(ui,*object)))+2.0f);
                 }
             }
+        }
+    }
+    void EditWithKeyboard(char character)
+    {
+        switch(static_cast<NativeMenuTextKey>(character)) {
+        case NativeMenuTextKey::Left:MoveEditText(-1);break;
+        case NativeMenuTextKey::Right:MoveEditText(1);break;
+        case NativeMenuTextKey::Home:MoveEditText(-limit_);break;
+        case NativeMenuTextKey::End:MoveEditText(static_cast<int>(std::strlen(edit_.data()))-editPosition_);break;
+        case NativeMenuTextKey::Delete:DeleteCharacter();break;
+        default:if(character==8)DeleteCharacter(true);else EnterCharacter(character);break;
         }
     }
     void SwitchCharSet() {map_=map_==DefaultMap?UpperMap:DefaultMap;RedrawCharSet();}
@@ -188,7 +258,31 @@ public:
         default:return true;
         }
     }
+    bool Pointer(ScreenCallbackData& data)
+    {
+        const float x=static_cast<float>(data.key),y=static_cast<float>(data.value);
+        for(int row=0;row<3;++row)for(int column=0;column<14;++column) {
+            if(std::abs(x-GetColumnX(column))>14.0f || std::abs(y-GetRowY(row))>14.0f)continue;
+            column_=column;row_=row;UpdateCursor();
+            if(data.sound && !SelectChar(data)) {
+                if(!profileName_)Commit();
+                return false;
+            }
+            return true;
+        }
+        return true;
+    }
+    std::string Name() const {return edit_.data();}
+    void Commit()
+    {
+        if(!profileName_) {
+            CopyNameBytes(Profile().playerName,edit_.data(),PLAYER_NAME_CAPACITY);
+            Ui().resources->SetFittedText(screen_,nameObject_,Ui().language,Profile().playerName);
+        }
+        Unactivate();
+    }
 private:
+    static std::uint32_t ProfileCell(int index) {return hashString("PC_NAME_1")+static_cast<std::uint32_t>(index);}
     FlailerUiState& Ui() const {return *services_.ui;}
     PlayerSettings& Profile() const {return services_.frontend->players[static_cast<std::size_t>(player_)]->settings;}
     float GetCenter(const char* format,std::int32_t number,bool horizontal)
@@ -199,26 +293,27 @@ private:
             "Name keyboard lacks its authored row/column anchor");
         return static_cast<float>(horizontal ? left+(right-left)/2 : top+(bottom-top)/2);
     }
-    void Commit() {CopyNameBytes(Profile().playerName,edit_.data(),11);Unactivate();}
     MainMenuScreenServices& services_;
     std::uint32_t screen_;
     std::int32_t player_{},row_{},column_{},editPosition_{};
     std::uint32_t nameObject_{NameObjects[0]};
     tCubic2D cursor_{};
     tCubic1D slide_{};
-    std::array<char,8> edit_{};
-    float savedX_{},savedY_{};
+    std::array<char,16> edit_{};
+    std::int32_t limit_{7};
+    bool profileName_{},extendedName_{};
+    float savedX_{},savedY_{},profileRowY_{},profileGridBaseY_{};
     const char (*map_)[15]{DefaultMap};
     FlailerSineWave pulse_;
 };
 
 struct tNameEntryData {
-    std::array<std::array<char,12>,2> names{};
+    std::array<std::array<char,PLAYER_NAME_CAPACITY>,2> names{};
     std::array<std::uint8_t,2> genders{};
     void Init(const FrontendPlayerManager& frontend)
     {
         for (std::size_t i=0;i<2;++i) {
-            CopyNameBytes(names[i].data(),frontend.players[i]->settings.playerName,12);
+            CopyNameBytes(names[i].data(),frontend.players[i]->settings.playerName,names[i].size());
             // Final profile+64B, cPlayerSettings+7 (PreferredGender in the
             // individually retained owner schema). Existing native field.
             genders[i]=frontend.players[i]->settings.authoredTimeDisplayOption;
@@ -227,7 +322,7 @@ struct tNameEntryData {
     bool Different(const FrontendPlayerManager& frontend) const
     {
         for (std::size_t i=0;i<2;++i)
-            if (std::strncmp(names[i].data(),frontend.players[i]->settings.playerName,12)!=0)return true;
+            if (std::strncmp(names[i].data(),frontend.players[i]->settings.playerName,names[i].size())!=0)return true;
         for (std::size_t i=0;i<2;++i)
             if (genders[i]!=frontend.players[i]->settings.authoredTimeDisplayOption)return true;
         return false;
@@ -245,14 +340,21 @@ public:
     {
         keyboard_.SetVisible(0,0);keyboard_.SetVisible(1,0);
         for (std::size_t i=0;i<2;++i)
-            services_.ui->resources->Printf(screen_,NameObjects[i],"%s",services_.frontend->players[i]->settings.playerName);
+            services_.ui->resources->SetFittedText(screen_,NameObjects[i],services_.ui->language,
+                services_.frontend->players[i]->settings.playerName);
         RedrawGenders();snapshot_.Init(*services_.frontend);
+    }
+    ~NameEntry()
+    {
+        if(services_.pcHost)services_.pcHost->SetMenuTextInput(false);
     }
     bool MaybeActivateKeyboard(ScreenCallbackData& data)
     {
         const std::int32_t player=data.key==0x52e039f5u?1:0;
         if (data.joystickPort!=player)return false;
-        keyboard_.Activate(player);editing_=true;services_.screens->SetHelpOverride(KeyboardHelp);return true;
+        keyboard_.Activate(player);editing_=true;services_.screens->SetHelpOverride(KeyboardHelp);
+        if(services_.pcHost)services_.pcHost->SetMenuTextInput(true);
+        return true;
     }
     void ChangeGender(ScreenMessage message,ScreenCallbackData& data)
     {
@@ -285,8 +387,28 @@ public:
     void HandleEvent(ScreenMessage message,ScreenCallbackData& data)
     {
         if (message==ScreenMessage::Tick) {highlight_.Animate();selection_.Animate();blurb_.Animate();}
-        if (editing_) {
-            if (!keyboard_.HandleEvent(message,data)) {editing_=false;services_.screens->SetHelpOverride(nullptr);}
+        if(editing_) {
+            if(message==ScreenMessage::Pointer) {
+                const bool editing=keyboard_.Pointer(data);
+                data.key=0xffffffffu;
+                if(!editing) {
+                    editing_=false;services_.screens->SetHelpOverride(nullptr);
+                    if(services_.pcHost)services_.pcHost->SetMenuTextInput(false);
+                }
+                return;
+            }
+            if(message==ScreenMessage::Tick && services_.pcHost) {
+                for(const char character:services_.pcHost->TakeMenuTextInput()) {
+                    if(character!=13 && character!=27) {keyboard_.EditWithKeyboard(character);continue;}
+                    keyboard_.Commit();
+                    editing_=false;services_.screens->SetHelpOverride(nullptr);
+                    services_.pcHost->SetMenuTextInput(false);return;
+                }
+            }
+            if(!keyboard_.HandleEvent(message,data)) {
+                editing_=false;services_.screens->SetHelpOverride(nullptr);
+                if(services_.pcHost)services_.pcHost->SetMenuTextInput(false);
+            }
             return;
         }
         arrows_.HandleEvent(message,data);
@@ -320,6 +442,80 @@ private:
     bool editing_{};
 };
 std::unique_ptr<NameEntry> nameOwner;
+}
+
+struct NativeProfileNameEditor::Storage {
+    MainMenuScreenServices& services;
+    tKeyboard keyboard;
+    std::uint32_t screen{};
+    bool grid{};
+    Storage(MainMenuScreenServices& owner,std::uint32_t screenKey,float rowY,bool gridAbove)
+        :services(owner),keyboard(owner,screenKey),screen(screenKey)
+    {
+        keyboard.ActivateProfile(rowY,gridAbove);
+        SetGrid(owner.pcHost->PromptDevice()!=platform::NativePromptDevice::Keyboard);
+        owner.pcHost->SetMenuTextInput(true);
+    }
+    ~Storage()
+    {
+        keyboard.Unactivate();
+        services.screens->SetHelpOverride(nullptr);
+        services.pcHost->SetMenuTextInput(false);
+    }
+    void SetGrid(bool visible)
+    {
+        grid=visible;keyboard.SetGridVisible(visible);
+        services.screens->SetHelpOverride(visible?KeyboardHelp:nullptr);
+    }
+};
+
+NativeProfileNameEditor::NativeProfileNameEditor(MainMenuScreenServices& services,std::uint32_t screen,float rowY,bool gridAbove)
+    :storage_(std::make_unique<Storage>(services,screen,rowY,gridAbove)) {}
+NativeProfileNameEditor::~NativeProfileNameEditor()=default;
+bool NativeProfileNameEditor::GridVisible() const noexcept {return storage_->grid;}
+std::string NativeProfileNameEditor::Name() const {return storage_->keyboard.Name();}
+
+NativeProfileNameEditor::Result NativeProfileNameEditor::HandleEvent(ScreenMessage message,ScreenCallbackData& data)
+{
+    auto& state=*storage_;
+    if(message==ScreenMessage::LeaveScreen) {data.value=0;return Result::Cancel;}
+    if(message==ScreenMessage::ScreenBack) {data.value=1;return Result::Editing;}
+    if(message==ScreenMessage::Pointer) {
+        if(data.sound) {
+            auto& ui=*state.services.ui;
+            for(const auto* name:{"PC_BACK_TEXT","PC_BACK_ICON"}) {
+                const auto key=hashString(name);
+                const auto* hint=ui.resources->FindObject(state.screen,key,1);
+                int left{},top{},right{},bottom{};
+                const int x=static_cast<int>(data.key);
+                if(hint && hint->visible && ui.resources->GetBoundingBox(state.screen,key,left,top,right,bottom,ui.language) &&
+                    x>=left-6 && x<=right+6 && data.value>=top-6 && data.value<=bottom+6) {
+                    data.key=0xffffffffu;return Result::Cancel;
+                }
+            }
+        }
+        const bool accepted=state.grid && !state.keyboard.Pointer(data);
+        data.key=0xffffffffu;
+        return accepted?Result::Accept:Result::Editing;
+    }
+    if(message==ScreenMessage::Tick) {
+        state.keyboard.Tick();
+        for(const char character:state.services.pcHost->TakeMenuTextInput()) {
+            if(character==27)return Result::Cancel;
+            if(character==13)return Result::Accept;
+            if(state.grid)state.SetGrid(false);
+            state.keyboard.EditWithKeyboard(character);
+        }
+        return Result::Editing;
+    }
+    if(data.joystickPort!=0)return Result::Editing;
+    if(message==ScreenMessage::Left || message==ScreenMessage::Right || message==ScreenMessage::Previous ||
+        message==ScreenMessage::Next || message==ScreenMessage::Select || message==ScreenMessage::ItemEvent) {
+        if(!state.grid)state.SetGrid(true);
+        if(message==ScreenMessage::Select)return state.keyboard.SelectChar(data)?Result::Editing:Result::Accept;
+    }
+    state.keyboard.HandleEvent(message,data);
+    return Result::Editing;
 }
 
 void BindNameEntryScreen(MainMenuScreenServices& services)

@@ -543,6 +543,10 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
             if (race.specialPursuit && !seat)character=PickCopCharacterNumber(race,*bindings.tracks,characters);
             auto& ride=selectedRide(seat);ride.reserved=1;
             auto liveRide=ride;
+            const auto model=static_cast<std::size_t>(ride.modelCode);
+            // Previous PC builds could save a texture-only paint without a SkinInfo row.
+            if(!cars.FindSkin(ride.modelCode,ride.skinNumber,false) && cars.AvailableSkinCount(model)>0)
+                liveRide.skinNumber=static_cast<std::int8_t>(cars.AvailableSkinNumber(model,0,language.currentLanguage!=0));
             // A stored profile can retain its dashboard flag independently
             // of the current PC preference. The selected live race must not
             // load a cockpit when this preference is disabled.
@@ -552,7 +556,7 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
             // the existing camera cycle can enter its authored kind-1 view.
             // Released split-screen catalogues have no interior views.
             if(applicationNativeGameplay.cockpitView && race.mode==1 &&
-               HasNativeCockpitResources(cars.Car(static_cast<std::size_t>(ride.modelCode))))
+               HasNativeCockpitResources(cars.Car(model)))
                 liveRide.dashboardTextures=1;
             RaceDriverInfo driver{};
             InitializeDriverInfo(driver,seat,1,liveRide,character,-2,race.playerStartingPositions[seat],characters);
@@ -571,6 +575,8 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
     }
     bool triedMinimum=false,triedMaximum=false;
     const auto requestedOpponents=race.opponentCount;
+    const bool freshRoster=!race.demoReplay && (!bindings.demoReplay || !bindings.demoReplay->active);
+    const bool includeNfs=applicationNativeGameplay.randomNfsEditionOpponents && freshRoster;
     std::int32_t activeOpponents=0;
     for (std::int32_t opponent=0;opponent<requestedOpponents;++opponent) {
         const auto character=PickCharacterNumberThatIsntRacing(characterChoices.data(),8,-1,characters);
@@ -612,8 +618,8 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
                         else if (!triedMaximum) { vehicleClass=maximumClass;triedMaximum=true; }
                         else vehicleClass=minimumClass+static_cast<std::int32_t>(vectorDefaultRandomBounded(
                             static_cast<std::uint32_t>(maximumClass-minimumClass+1)));
-                        cars.WeightedPickRide(ride,0,vehicleClass,race,language);
-                        if (ride.modelCode==-1)cars.WeightedPickRide(ride,0,-1,race,language);
+                        cars.WeightedPickRide(ride,0,vehicleClass,race,language,includeNfs);
+                        if (ride.modelCode==-1)cars.WeightedPickRide(ride,0,-1,race,language,includeNfs);
                         ++innerAttempt;
                     } while (innerAttempt<1001 && AreThereTooManyUniqueCarGeometries(race,ride,cars));
                     bool accepted=true;
@@ -631,10 +637,11 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
     }
     race.opponentCount=activeOpponents;
     const auto trafficCount=std::fabs(race.trafficDensity)<=0.001f ? 0 : 6;
+    const bool restoreCutTraffic=applicationNativeGameplay.restoreCutTraffic && freshRoster;
     for (std::int32_t index=0;index<trafficCount;++index) {
         CarAppearanceSelection ride{};ride.modelCode=-1;
         for (std::int32_t attempt=0;attempt<100;++attempt) {
-            cars.WeightedPickRide(ride,2,-1,race,language);ride.skinNumber=-1;
+            cars.WeightedPickRide(ride,2,-1,race,language,false,restoreCutTraffic);ride.skinNumber=-1;
             if (!AreThereAnyCarsOfType(race,ride.modelCode))break;
         }
         RaceDriverInfo driver{};
@@ -760,15 +767,6 @@ void FrontendPlayerManager::StartRace(const FrontendRaceSetupBindings& bindings)
         // Release it after ReplayManager has returned its borrowed nodes.
     }
     race.eventGame=gameType==8 || gameType==9;
-    // PC policy AFTER the retail race and replay snapshot have been built:
-    // Quick Game (2), Free Run (6), and Event Trees (8/9) provide no user
-    // Catch Up selector. Do not retain their PAL-forced enabled default.
-    // Actual selectable Challenge setup (3/4/5/7) keeps the user's choice,
-    // except when the optional launcher override disables it explicitly.
-    // Demo/replay snapshots remain intact for deterministic playback.
-    if(!bindings.demoReplay->active && !race.fastSpeedTrapSpawns &&
-       ShouldDisableRaceCatchUp(gameType,applicationNativeGameplay.disableCatchUp))
-        race.relativePaceEnabled=0;
     race.unlockedRewardCarCount=0;
     // Complete PAL-only1FF978 operations within this licensed caller: count
     // actual car rewards which are unlocked across the same retained trees.
@@ -830,15 +828,16 @@ void FrontendPlayerInfo::SetCarAvailability(std::int32_t status,std::int32_t mod
     record.status=status;record.allowDashboardTextures=allowDashboard;record.skinCount=0;
     if (skin==-1) {
         Require(cars,"Frontend availability has no canonical car catalogue");
-        const auto count=cars->AvailableSkinCount(static_cast<std::size_t>(model));
+        const auto modelIndex=static_cast<std::size_t>(model);
+        const auto count=cars->AvailableSkinCount(modelIndex);
         const auto& definition=cars->Car(static_cast<std::size_t>(model));
         if (definition.bodyCategory==1)
             Require(language,"Frontend skin enumeration has no live language manager");
+        Require(count>=0 && static_cast<std::size_t>(count)<=record.skinNumbers.size(),
+            "Selectable skins exceed the frontend bank");
         for (std::int32_t index=0;index<count;++index) {
-            const auto number=cars->AvailableSkinNumber(static_cast<std::size_t>(model),index,
-                language && language->currentLanguage!=0);
-            if (record.skinCount<static_cast<std::int32_t>(record.skinNumbers.size()))
-                record.skinNumbers[static_cast<std::size_t>(record.skinCount)]=static_cast<std::uint8_t>(number);
+            const auto number=cars->AvailableSkinNumber(modelIndex,index,language && language->currentLanguage!=0);
+            record.skinNumbers[static_cast<std::size_t>(record.skinCount)]=static_cast<std::uint8_t>(number);
             ++record.skinCount;
         }
     } else { record.skinNumbers[0]=static_cast<std::uint8_t>(skin);record.skinCount=1; }
@@ -1253,24 +1252,32 @@ static void storeWord(uint8_t* p, uint32_t value)
     p[3] = (uint8_t)(value >> 24);
 }
 
-uint32_t saveGameCalculateChecksum(const uint8_t* data)
+static uint32_t checksumProfileWords(const uint8_t* data,size_t checksumOffset)
 {
     uint32_t sum = 0;
-    for (size_t offset = 0; offset < GAME_SAVE_CHECKSUM_OFFSET; offset += 4)
+    for (size_t offset = 0; offset < checksumOffset; offset += 4)
         sum += loadWord(data + offset);
     return sum;
 }
 
+static constexpr std::size_t ExtendedProfileSize=std::tuple_size_v<hp2::frontend::FrontendPlayerManager::NativeProfileImage>;
+static_assert(ExtendedProfileSize%4==0);
+
+uint32_t saveGameCalculateChecksum(const uint8_t* data)
+{
+    return checksumProfileWords(data,GAME_SAVE_CHECKSUM_OFFSET);
+}
+
 int saveGameIsValid(const uint8_t* data, size_t size)
 {
-    return data != NULL && size == GAME_SAVE_SIZE &&
-           loadWord(data + GAME_SAVE_CHECKSUM_OFFSET) == saveGameCalculateChecksum(data);
+    return data != NULL && (size == GAME_SAVE_SIZE || size == ExtendedProfileSize) &&
+           loadWord(data + size - 4) == checksumProfileWords(data,size-4);
 }
 
 int saveGameFinalize(uint8_t* data, size_t size)
 {
-    if (data == NULL || size != GAME_SAVE_SIZE) return 0;
-    storeWord(data + GAME_SAVE_CHECKSUM_OFFSET, saveGameCalculateChecksum(data));
+    if (data == NULL || (size != GAME_SAVE_SIZE && size != ExtendedProfileSize)) return 0;
+    storeWord(data + size - 4,checksumProfileWords(data,size-4));
     return 1;
 }
 
@@ -1457,10 +1464,12 @@ public:
     std::string String(const char* name,const std::string& value) {
         auto& node=Field(name,ProfileJsonValue::Kind::String);if(!reading_)node.text=value;return node.text;
     }
-    void Header() {
+    std::uint32_t Header(std::uint32_t outputVersion=2) {
         BeginObject(nullptr);const auto format=String("format","NFSHP2 profile");
-        const auto version=Scalar("version",std::uint32_t{1});const auto encoding=String("name_encoding","ISO-8859-1");
-        ProfileCheck(format=="NFSHP2 profile" && version==1 && encoding=="ISO-8859-1","Unsupported native text profile format, version or name encoding");
+        const auto version=Scalar("version",outputVersion);const auto encoding=String("name_encoding","ISO-8859-1");
+        ProfileCheck(format=="NFSHP2 profile" && (version==1 || version==2) && encoding=="ISO-8859-1",
+            "Unsupported native text profile format, version or name encoding");
+        return version;
     }
     std::string Finish() {
         ProfileCheck(stack_.empty(),"Profile JSON document was not finished");std::string text;
@@ -1540,6 +1549,8 @@ struct FrontendProfileStream {
     FrontendProfileJson* json{};
     FrontendProfileStream* validated{};
     bool checkEventBindings{true};
+    bool extendedNames{};
+    std::string* primaryName{};
     std::array<std::array<std::unique_ptr<EventStateSnapshot>,256>,2> preparedEvents{};
     bool Reading() const noexcept {return mode!=Mode::Save && mode!=Mode::ExportText;}
     bool Applying() const noexcept {return mode==Mode::Commit;}
@@ -1574,7 +1585,7 @@ struct FrontendProfileStream {
         // Released names are byte-font strings. ISO-8859-1 gives each source
         // byte one exact Unicode scalar, including escaped embedded NULs.
         // Trailing zero padding is implicit; nonzero tails are not discarded.
-        std::array<char,12> decoded{};ProfileCheck(count<=decoded.size(),"Native profile name exceeds its source bank");
+        std::array<char,PLAYER_NAME_CAPACITY> decoded{};ProfileCheck(count<=decoded.size(),"Native profile name exceeds its source bank");
         const char* source=(Reading() && mode!=Mode::ImportText)?reinterpret_cast<const char*>(input+position):values;
         if(json) {
             if(json->Reading()) {
@@ -1592,9 +1603,18 @@ struct FrontendProfileStream {
             }
         }
         if(terminated)ProfileCheck(std::memchr(source,0,count)!=nullptr,"Native saved name has no terminator");
+        if(primaryName && name && std::strcmp(name,"player_name")==0) {
+            *primaryName=source;
+            primaryName=nullptr;
+        }
         if(Applying())std::memcpy(values,source,count);
         if(WritingBinary())std::memcpy(output+position,source,count);
         position+=count;
+    }
+    void PlayerName(const char* name,char* value) {
+        const auto count=extendedNames?static_cast<std::size_t>(PLAYER_NAME_CAPACITY):12u;
+        Bytes(name,value,count,true);
+        if(Applying() && count<PLAYER_NAME_CAPACITY)std::fill(value+count,value+PLAYER_NAME_CAPACITY,'\0');
     }
     template<class T,std::size_t N> void Scalars(const char* name,std::array<T,N>& values) {
         Array(name,N);for(auto& value:values)Scalar(nullptr,value);End();
@@ -1604,7 +1624,7 @@ struct FrontendProfileStream {
         Scalar("alternate_camera",p.alternateCamera);Scalar("split_time_mode",p.splitTimeMode);Scalar("camera_spring",p.cameraSpring);Scalar("lookback",p.lookback);
         Scalar("hud_flags",p.hudFlags);Scalar("hud_hotkey",p.hudHotkey);Scalar("scoring",p.scoring);Scalar("input_profile",p.inputProfile);
         Scalar("authored_option",p.authoredOption);Scalar("initial_vehicle_mode",p.initialVehicleMode);Scalar("gear_input_mode",p.gearInputMode);Scalar("camera_view",p.cameraView);
-        Scalar("authored_time_display_option",p.authoredTimeDisplayOption);Bytes("player_name",p.playerName,12,true);
+        Scalar("authored_time_display_option",p.authoredTimeDisplayOption);PlayerName("player_name",p.playerName);
         Scalar("best_total_time_ticks",p.bestTotalTimeTicks);Scalar("best_lap_time_ticks",p.bestLapTimeTicks);End();
     }
     void Ride(CarAppearanceSelection& p) {
@@ -1704,7 +1724,7 @@ struct FrontendProfileStream {
         Scalar("knockout_track_policy",f.knockoutTrackPolicy);Scalar("pending_state",f.pendingState);Scalar("record_display_suppressed",f.recordDisplaySuppressed);
         Scalar("cops_enabled",f.copsEnabled);Scalars("task_rewards_earned",f.taskRewardsEarned);Scalars("points_rewards_earned",f.pointsRewardsEarned);
         Scalar("race_aborted",f.raceAborted);Scalars("challenge_damage",f.savedChallengeOptions);
-        Array("record_player_names",f.recordPlayerNames.size());for(auto& name:f.recordPlayerNames)Bytes(nullptr,name.data(),name.size(),true);End();
+        Array("record_player_names",f.recordPlayerNames.size());for(auto& name:f.recordPlayerNames)PlayerName(nullptr,name.data());End();
         auto& music=f.musicSettings;FrontendMusicSettings incomingAudio;
         Object("audio");Array("playlist",music.rows.size());
         for(std::size_t index=0;index<music.rows.size();++index) {
@@ -1796,7 +1816,8 @@ struct FrontendProfileStream {
             "Saved music navigation index exceeds its original backing array");
     }
     void Joysticks(FrontendPlayerManager& f) {
-        constexpr std::array<std::int32_t,16> allowed{{0,10,11,12,13,20,21,22,23,30,31,32,33,40,50,51}};
+        constexpr std::array<std::int32_t,20> allowed{{0,10,11,12,13,20,21,22,23,30,31,32,33,40,50,51,
+            JOYSTICK_LAYOUT_E,JOYSTICK_LAYOUT_F,JOYSTICK_LAYOUT_G,JOYSTICK_LAYOUT_H}};
         Array("joystick_configurations",f.joystickConfigurations.size());
         for(auto& configuration:f.joystickConfigurations) {
             const auto value=Scalar(nullptr,configuration);
@@ -1810,31 +1831,41 @@ std::size_t ValidateProfileEnvelope(const void* data,std::size_t bytes)
 {
     const auto* image=static_cast<const std::uint8_t*>(data);
     ProfileCheck(saveGameIsValid(image,bytes)!=0,"Native profile size/checksum does not match its stored image");
-    ProfileCheck(loadWord(image)==GAME_SAVE_SIZE && !std::memcmp(image+4,"NFRED57",8) && loadWord(image+12)==1,
+    const auto version=loadWord(image+12);
+    ProfileCheck(loadWord(image)==bytes && !std::memcmp(image+4,"NFRED57",8) &&
+        ((version==1 && bytes==GAME_SAVE_SIZE) || (version==2 && bytes==ExtendedProfileSize)),
         "Unsupported native profile version; raw PS2 memory images are not this native format");
-    const auto end=loadWord(image+16);ProfileCheck(end>=20 && end<=GAME_SAVE_CHECKSUM_OFFSET,"Saved payload length is invalid");
-    for(std::size_t i=end;i<GAME_SAVE_CHECKSUM_OFFSET;++i)ProfileCheck(image[i]==0,"Native profile reserved bytes are not zero");
+    const auto checksumOffset=bytes-4;
+    const auto end=loadWord(image+16);ProfileCheck(end>=20 && end<=checksumOffset,"Saved payload length is invalid");
+    for(std::size_t i=end;i<checksumOffset;++i)ProfileCheck(image[i]==0,"Native profile reserved bytes are not zero");
     return end;
 }
-void ProfileEnvelope(std::array<std::uint8_t,GAME_SAVE_SIZE>& image,std::size_t end)
+void ProfileEnvelope(FrontendPlayerManager::NativeProfileImage& image,std::size_t end,bool extendedNames)
 {
-    storeWord(image.data(),GAME_SAVE_SIZE);std::memcpy(image.data()+4,"NFRED57",8);storeWord(image.data()+12,1);
+    const auto size=extendedNames?image.size():GAME_SAVE_SIZE;
+    storeWord(image.data(),static_cast<std::uint32_t>(size));
+    std::memcpy(image.data()+4,"NFRED57",8);storeWord(image.data()+12,extendedNames?2u:1u);
     storeWord(image.data()+16,static_cast<std::uint32_t>(end));
-    ProfileCheck(saveGameFinalize(image.data(),image.size())!=0,"Native profile checksum finalization failed");
+    ProfileCheck(saveGameFinalize(image.data(),size)!=0,"Native profile checksum finalization failed");
 }
-std::array<std::uint8_t,GAME_SAVE_SIZE> ParseTextProfile(const void* data,std::size_t bytes,FrontendPlayerManager& owner,bool checkEventBindings=true)
+FrontendPlayerManager::NativeProfileImage ParseTextProfile(const void* data,std::size_t bytes,FrontendPlayerManager& owner,bool checkEventBindings=true)
 {
-    FrontendProfileJson json(data,bytes);json.Header();std::array<std::uint8_t,GAME_SAVE_SIZE> image{};
+    FrontendProfileJson json(data,bytes);const auto version=json.Header();FrontendPlayerManager::NativeProfileImage image{};
     FrontendProfileStream stream{FrontendProfileStream::Mode::ImportText,image.data(),nullptr};stream.json=&json;stream.checkEventBindings=checkEventBindings;
-    stream.Run(owner);json.End();ProfileEnvelope(image,stream.position);return image;
+    stream.extendedNames=version==2;
+    if(stream.extendedNames)stream.limit=ExtendedProfileSize-4;
+    stream.Run(owner);json.End();
+    ProfileEnvelope(image,stream.position,stream.extendedNames);return image;
 }
 }
 
-std::array<std::uint8_t,GAME_SAVE_SIZE> FrontendPlayerManager::SerializeNativeProfile() const
+FrontendPlayerManager::NativeProfileImage FrontendPlayerManager::SerializeNativeProfile() const
 {
-    std::array<std::uint8_t,GAME_SAVE_SIZE> image{};
-    FrontendProfileStream stream{FrontendProfileStream::Mode::Save,image.data(),nullptr};stream.Run(const_cast<FrontendPlayerManager&>(*this));
-    ProfileEnvelope(image,stream.position);return image;
+    NativeProfileImage image{};
+    FrontendProfileStream stream{FrontendProfileStream::Mode::Save,image.data(),nullptr};
+    stream.extendedNames=true;stream.limit=ExtendedProfileSize-4;
+    stream.Run(const_cast<FrontendPlayerManager&>(*this));
+    ProfileEnvelope(image,stream.position,true);return image;
 }
 
 bool FrontendPlayerManager::DeserializeNativeProfile(const void* data,std::size_t bytes,std::string& error)
@@ -1842,12 +1873,14 @@ bool FrontendPlayerManager::DeserializeNativeProfile(const void* data,std::size_
     error.clear();
     try {
         const auto end=ValidateProfileEnvelope(data,bytes);const auto* image=static_cast<const std::uint8_t*>(data);
-        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};validate.Run(*this);
+        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};
+        validate.extendedNames=loadWord(image+12)==2;validate.Run(*this);
         ProfileCheck(validate.position==end,"Saved native profile has trailing fields from a different schema");
         // Every absent typed event cell is allocated during validation. The
         // final traversal only assigns scalars and moves prepared owners;
         // failures cannot leave half a loaded profile or invalidate borrowers.
-        FrontendProfileStream commit{FrontendProfileStream::Mode::Commit,nullptr,image,20,end};commit.validated=&validate;commit.Run(*this);
+        FrontendProfileStream commit{FrontendProfileStream::Mode::Commit,nullptr,image,20,end};
+        commit.validated=&validate;commit.extendedNames=validate.extendedNames;commit.Run(*this);
         return true;
     } catch(const std::exception& e) {error=e.what();return false;}
 }
@@ -1855,16 +1888,18 @@ bool FrontendPlayerManager::DeserializeNativeProfile(const void* data,std::size_
 std::string FrontendPlayerManager::SerializeNativeProfileText() const
 {
     FrontendProfileJson json(false);json.Header();FrontendProfileStream stream{FrontendProfileStream::Mode::ExportText};stream.json=&json;
+    stream.extendedNames=true;stream.limit=ExtendedProfileSize-4;
     stream.Run(const_cast<FrontendPlayerManager&>(*this));json.End();return json.Finish();
 }
 
-bool FrontendPlayerManager::ValidateNativeProfileText(const void* data,std::size_t bytes,std::string& error) const
+bool FrontendPlayerManager::ValidateNativeProfileText(const void* data,std::size_t bytes,std::string& error,std::string* playerName) const
 {
     error.clear();
     try {
         auto& owner=const_cast<FrontendPlayerManager&>(*this);const auto image=ParseTextProfile(data,bytes,owner,false);
-        const auto end=ValidateProfileEnvelope(image.data(),image.size());
-        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image.data(),20,end};validate.checkEventBindings=false;validate.Run(owner);
+        const auto end=ValidateProfileEnvelope(image.data(),loadWord(image.data()));
+        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image.data(),20,end};
+        validate.checkEventBindings=false;validate.primaryName=playerName;validate.extendedNames=loadWord(image.data()+12)==2;validate.Run(owner);
         ProfileCheck(validate.position==end,"Saved text profile has an incomplete logical payload");return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }
@@ -1872,7 +1907,7 @@ bool FrontendPlayerManager::ValidateNativeProfileText(const void* data,std::size
 bool FrontendPlayerManager::DeserializeNativeProfileText(const void* data,std::size_t bytes,std::string& error)
 {
     error.clear();
-    try {const auto image=ParseTextProfile(data,bytes,*this);return DeserializeNativeProfile(image.data(),image.size(),error);}
+    try {const auto image=ParseTextProfile(data,bytes,*this);return DeserializeNativeProfile(image.data(),loadWord(image.data()),error);}
     catch(const std::exception& e){error=e.what();return false;}
 }
 
@@ -1882,10 +1917,12 @@ bool FrontendPlayerManager::ConvertLegacyProfileToText(const void* data,std::siz
     try {
         const auto end=ValidateProfileEnvelope(data,bytes);const auto* image=static_cast<const std::uint8_t*>(data);
         auto& owner=const_cast<FrontendPlayerManager&>(*this);
-        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};validate.Run(owner);
+        FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};
+        validate.extendedNames=loadWord(image+12)==2;validate.Run(owner);
         ProfileCheck(validate.position==end,"Legacy profile has trailing fields from a different schema");
-        FrontendProfileJson json(false);json.Header();
-        FrontendProfileStream stream{FrontendProfileStream::Mode::ExportLegacyText,nullptr,image,20,end};stream.json=&json;stream.Run(owner);json.End();
+        FrontendProfileJson json(false);json.Header(validate.extendedNames?2u:1u);
+        FrontendProfileStream stream{FrontendProfileStream::Mode::ExportLegacyText,nullptr,image,20,end};
+        stream.json=&json;stream.extendedNames=validate.extendedNames;stream.Run(owner);json.End();
         text=json.Finish();return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }

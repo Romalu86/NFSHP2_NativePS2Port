@@ -178,6 +178,7 @@ void raceCoordinatorReleaseScreenCameras(GameSession& session);
 // Source RC+28/+2C borrowers used by ReplayScreen.Tick and MainLoop.
 bool raceCoordinatorHasEndGameScreens(const GameSession& session) noexcept;
 void raceCoordinatorUpdateReplayScreen(GameSession& session);
+void raceCoordinatorReplayPointer(GameSession& session,float x,float y,bool click,bool held);
 /* Full original methods149CB8/149D78 once supplied with the same live
  * Player owners. InitForRace's outer creation graph remains independent. */
 int32_t raceCoordinatorInitPlayers(GameSession& session,int32_t aiDemo);

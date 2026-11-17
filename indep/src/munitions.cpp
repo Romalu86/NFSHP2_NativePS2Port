@@ -458,11 +458,12 @@ void chopperMunitionDetonate(ChopperMunition* actor)
     // The earlier hand-seeded fixture used the beta's smoke group here.
     const uint32_t group = hashString(actor->kind == CHOPPER_MUNITION_SMOKE_BOMB ? "SMOKEBOMBEXPLD" : "ROCKETEXPLD");
     ChopperMunitionEffects* effects=registry->bindings.effects;
-    ChopperEffectInstance* previousFirst=effects->first;
+    const auto firstGeneration=effects->nextGeneration;
     const auto visualResult = chopperEffectsSpawnGroup(effects, group, frame);
-    // Both members of an authored detonation clone carry the registry owner,
-    // not the rocket's ephemeral actor (destroyed later in the same tick).
-    for (ChopperEffectInstance* instance=effects->first;instance!=previousFirst;instance=instance->next)
+    // The spawn can reclaim completed instances before publishing new ones.
+    // Tag only the new generation range with the longer-lived registry.
+    for (ChopperEffectInstance* instance=effects->first;
+         instance && instance->generation>=firstGeneration;instance=instance->next)
         instance->lifetimeOwner=registry;
     if (visualResult != WORLD_SERVICES_OK && visualResult != WORLD_SERVICES_CAPACITY) {
         registry->result = visualResult;
