@@ -77,7 +77,12 @@ void FlailerAnimatedBlurb::Animate()
     secondAlpha_.SetAlphaScale(0.0f);
     if (!textInstalled_) {
         ui_.resources->SetLanguageID(screenKey_,textKey_,0);
-        ui_.resources->SetLocalizedText(screenKey_,textKey_,text_.data());
+        // Fit to the authored hint clip at its settled position, before the
+        // original slide starts outside the screen. Keep the font proportions.
+        auto* text=ui_.resources->FindObject(screenKey_,textKey_,1);
+        Require(text,"Animated hint text is absent");
+        text->SetTopLeftX(destination_);
+        ui_.resources->SetFittedText(screenKey_,textKey_,ui_.language,text_.data());
         slide_.SetupToAnimate(650.0f,destination_);
         textInstalled_=true;
     } else if (slide_.position.mode!=0) {
@@ -660,7 +665,9 @@ void FlailerScrollingMenuList::SetDesiredTopLeftY(std::uint32_t key,float desire
 }
 void FlailerScrollingMenuList::SetCurrentObject(std::uint32_t key)
 {
-    auto& s=*storage_;const float y=s.Y(key);
+    auto& s=*storage_;
+    const auto* element=s.Find(key);
+    const float y=element?element->position.desiredValue:s.Y(key);
     if(y<s.top)SetDesiredTopLeftY(key,s.top);
     else if(s.bottom<y)SetDesiredTopLeftY(key,s.bottom);
 }
@@ -683,6 +690,13 @@ void FlailerScrollingMenuList::HandleEvent(ScreenMessage message,ScreenCallbackD
             else if(data.key==0xaee77883u || data.key==0xaee77884u)s.mask=6;
         }
         SetCurrentObject(data.key);
+        // Mouse selection has no preceding Next/Previous message. Derive the
+        // visible row from this scrolling owner's destination, including while
+        // a previous scroll is still animating.
+        if(const auto* selected=s.Find(data.key);selected && s.bottom>s.top) {
+            const float row=(selected->position.desiredValue-s.top)*6.0f/(s.bottom-s.top);
+            s.mask=std::clamp(static_cast<std::int32_t>(row+0.5f),0,6);
+        }
         s.ui.resources->SetObjectVisibility(s.screen,s.up,s.Show(true)?1:0);
         s.ui.resources->SetObjectVisibility(s.screen,s.down,s.Show(false)?1:0);
     } else if(message==ScreenMessage::Tick) {

@@ -1206,10 +1206,12 @@ CarCinematicResult carChaseCameraAdvance(CarChaseCamera* camera)
     }
     if (!view) return CAR_CINEMATIC_INVALID_BINDING;
     settings->responseScale = 1.0f;
-    float transpose[16], localAngular[4];
+    float transpose[16], localAcceleration[4];
     eTransposeMatrix(transpose, state->orientation);
-    vectorMatrixTransformPoint(localAngular, transpose, state->angularVelocity);
-    const float response = chaseUpdateRollResponse(camera, state, localAngular[0], elapsed);
+    // PAL15CB28 loads Car+80, the linear acceleration at CarState+40.
+    // Angular velocity is CarState+90 (Car+D0), a different source vector.
+    vectorMatrixTransformPoint(localAcceleration, transpose, state->linearAcceleration);
+    const float response = chaseUpdateRollResponse(camera, state, localAcceleration[0], elapsed);
     const uint16_t facingAngle = (uint16_t)convertFloatToInt32(camera->facingWeight * 32768.0f);
     const float facing = 1.0f - (vectorCosineAngle(facingAngle) + 1.0f) * 0.5f;
     float offsetX, offsetY, offsetZ;

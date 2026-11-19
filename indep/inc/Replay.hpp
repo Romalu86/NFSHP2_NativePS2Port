@@ -2,6 +2,9 @@
 #define NFSHP2_REPLAY_HPP
 
 #include "Joylog.hpp"
+#ifdef __cplusplus
+#include <vector>
+#endif
 typedef struct RaceActionQueue RaceActionQueue;
 #ifdef __cplusplus
 class ReplayManagerOwner;
@@ -50,6 +53,8 @@ typedef struct ReplayManager {
      * instant replays retain strict native synchronization. */
     ReplaySynchronizationPolicy synchronizationPolicy;
     ReplaySteeringPolicy steeringPolicy;
+    int32_t nativeStrongerOpponents; /* Captured PC rule; never part of the PAL payload. */
+    uint32_t nativeStateVersion; /* PC v13 records the traction-assist dwell timer. */
     uint32_t sourceReferenceSamples;
     uint32_t sourceReferenceMismatchCount;
     int32_t firstSourceReferenceMismatchLoop;
@@ -66,7 +71,11 @@ typedef struct ReplayManager {
     /* PAL+50/+40B0/+40B8; stopRequested already owns PAL+58. */
     int32_t beginCapturingLoopCount;
     int32_t specialEventCount;
+#ifdef __cplusplus
+    std::vector<ReplaySpecialEventInfo> specialEvents=std::vector<ReplaySpecialEventInfo>(256);
+#else
     ReplaySpecialEventInfo specialEvents[256];
+#endif
     /* Individually related constructor stores, PAL13D448. The released
      * desynchronized word at+0C is absent in beta; later source members are
      * four bytes later. Native fields are deliberately not a layout overlay. */
@@ -94,7 +103,11 @@ typedef struct ReplayManager {
     int32_t lastSnapshotTime;
     int32_t snapshotsTaken;
     int32_t lastSnapshotIndex;
+#ifdef __cplusplus
+    std::vector<int32_t> snapshotTimes=std::vector<int32_t>(4096);
+#else
     int32_t snapshotTimes[4096];
+#endif
     int32_t lastSpecialEventNumber;
 #ifdef __cplusplus
     ReplayManagerOwner* owner; /* The same allocation's native list owner. */
@@ -190,9 +203,13 @@ typedef struct ReplaySnapshot {
     uint32_t wireFormat;
     /* File metadata versions 10/11 select the cumulative native timer;
      * PAL8/native9 retain per-step rounding. Version11 also selects the
-     * corrected time-based steering law. Payload bytes are unchanged. */
+     * corrected time-based steering law. Version12 additionally carries
+     * explicit native rule flags. PC13 also captures native persistent state
+     * missing from the older snapshot layout; PAL bytes remain unchanged. */
     int32_t clockPolicy;
     ReplaySteeringPolicy steeringPolicy;
+    int32_t nativeStrongerOpponents; /* Captured PC rule; never part of the PAL payload. */
+    uint32_t nativeStateVersion;
     uint32_t sourcePlayerTokens[2];
 } ReplaySnapshot;
 
@@ -236,7 +253,7 @@ namespace hp2::frontend {class DemoModeReplay;}
 // is a complete timestep/input/synchronization boundary in the real bRepeat.
 class ReplayStreamIndex final {
 public:
-    void Build(const BitStream& source);
+    void Build(const BitStream& source,std::uint32_t nativeStateVersion=13);
     std::size_t FrameCount() const noexcept {return boundaries_.empty()?0:boundaries_.size()-1;}
     std::size_t FindFrame(const BitStream& reader) const noexcept;
     static constexpr std::size_t NoFrame=static_cast<std::size_t>(-1);
@@ -269,6 +286,10 @@ public:
     // availableBytes is the actual allocator's remaining allocation budget,
     // replacing bCountFreeMemory(16); no constant success budget is implied.
     void MarkTheBeginningOfTime(const GameTime& clock,std::size_t availableBytes);
+    // PC recording storage can grow without changing any retained bit offsets.
+    // Loaded PAL/Demo payloads stay borrowed and are never resized.
+    bool EnsureRecordingSpace();
+    bool HasRaceRecording() const noexcept;
     void BindRace(GameSession& coordinator,RaceParameters& parameters,const GameTime& clock,
         const CarDriverAppearanceCatalogue& characters,GameInputRouter& input);
     // Persistent timeline predicate. EndFrame clears the transient restoring

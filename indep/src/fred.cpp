@@ -517,8 +517,16 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
     const auto selectedRide=[this](std::int32_t seat)->CarAppearanceSelection& {
         Require(seat>=0 && seat<2 && players[static_cast<std::size_t>(seat)],"Race setup has no live player profile");
         auto& profile=*players[static_cast<std::size_t>(seat)];
+        profile.RefreshAdditionalCars(gameType==7 && seat==0,UseTheRaceEvent());
         Require(gameType>=0 && static_cast<std::size_t>(gameType)<profile.selectedRides.size(),"Race setup game type is outside the profile");
-        return profile.selectedRides[static_cast<std::size_t>(gameType)].appearance;
+        auto& selected=profile.selectedRides[static_cast<std::size_t>(gameType)];
+        if(selected.appearance.modelCode>=static_cast<std::int32_t>(CarInfoResource::CarCount) &&
+           profile.GetCarStatus(selected.appearance.modelCode)==3) {
+            for(std::size_t m=0;m<profile.cars->Count();++m)if(profile.cars->IsAvailable(m) && profile.GetCarStatus(static_cast<std::int32_t>(m))!=3) {
+                profile.BuildRideInfo(selected,static_cast<std::int32_t>(m),0,false);break;
+            }
+        }
+        return selected.appearance;
     };
     const auto eliminate=[this,&bindings,&race](std::int32_t number) {
         if (!UseTheRaceEvent())return false;
@@ -662,7 +670,9 @@ void FrontendPlayerManager::SetupCarsForRace(const FrontendRaceSetupBindings& bi
                 selected=static_cast<std::int32_t>(model);selectedClass=car.routeVehicleClass;
             }
         }
-        CarAppearanceSelection ride{};InitializeRideInfo(ride,selected,1,0,0);
+        const auto policeSkin=applicationNativeGameplay.restoredCarContent ?
+            cars.RandomSkin(static_cast<std::size_t>(selected),language.currentLanguage!=0):1;
+        CarAppearanceSelection ride{};InitializeRideInfo(ride,selected,policeSkin,0,0);
         RaceDriverInfo driver{};
         InitializeDriverInfo(driver,index+10,4,ride,character,-1,0,characters);AddDriverInfo(race,driver,cars);
     }
@@ -820,6 +830,44 @@ std::int32_t PickCopCharacterNumber(const RaceParameters& parameters,
     return character ? character->id : -1;
 }
 
+void FrontendPlayerInfo::RefreshAdditionalCars(bool policeOnly,bool eventWhitelist)
+{
+    Require(cars,"Additional car selection has no catalogue");
+    // Migrate only the rejected 17..25 paint-bank IDs from earlier test builds.
+    // Normal release choices, availability status and earned progress stay put.
+    for(std::size_t model=0;model<CarInfoResource::CarCount;++model) {
+        const auto old=availability[model];bool rejectedBank=false;
+        for(std::int32_t s=0;s<old.skinCount && s<10;++s) {
+            const auto number=old.skinNumbers[static_cast<std::size_t>(s)];
+            rejectedBank|=number>=17 && number<=25 && !cars->FindSkin(static_cast<std::int32_t>(model),number,false);
+        }
+        if(rejectedBank)SetCarAvailability(old.status,static_cast<std::int32_t>(model),-1,old.allowDashboardTextures!=0);
+    }
+    for(std::size_t model=CarInfoResource::CarCount;model<availability.size();++model) {
+        availability[model]={};availability[model].status=3;
+        if(model>=cars->Count() || !cars->IsAvailable(model))continue;
+        const auto& car=cars->Car(model);
+        if(policeOnly && car.bodyCategory!=1)continue;
+        if(eventWhitelist && availability[static_cast<std::size_t>(car.originalModelCode)].status==3)continue;
+        SetCarAvailability(0,static_cast<std::int32_t>(model),-1,false);
+    }
+    for(auto& selected:selectedRides) {
+        const auto model=selected.appearance.modelCode;
+        if(model<static_cast<std::int32_t>(CarInfoResource::CarCount)) {
+            const auto number=static_cast<std::int32_t>(selected.appearance.skinNumber);
+            if(model>=0 && number>=17 && number<=25 && !cars->FindSkin(model,number,false))
+                selected.appearance.skinNumber=static_cast<std::int8_t>(cars->FindSkin(model,number-16,false) ?
+                    number-16:cars->AvailableSkinNumber(model,0,language && language->currentLanguage!=0));
+            continue;
+        }
+        if(static_cast<std::size_t>(model)<cars->Count() && cars->IsAvailable(model))continue;
+        const auto fallback=static_cast<std::size_t>(model)<cars->Count() ? cars->OriginalModel(model):0;
+        selected.appearance.modelCode=fallback;
+        selected.appearance.skinNumber=static_cast<std::int8_t>(cars->AvailableSkinNumber(fallback,0,language && language->currentLanguage!=0));
+        selected.appearance.dashboardTextures=0;
+    }
+}
+
 void FrontendPlayerInfo::SetCarAvailability(std::int32_t status,std::int32_t model,
     std::int32_t skin,bool allowDashboard)
 {
@@ -947,7 +995,7 @@ bool AreThereAnyCarsOfColour(const RaceParameters& race,const CarInfoResource& c
 std::int32_t PickRandomSkinOfUniqueColour(const RaceParameters& race,const CarInfoResource& cars,
     const LanguageManager& language,std::int32_t model)
 {
-    Require(model>=0 && static_cast<std::size_t>(model)<CarInfoResource::CarCount,
+    Require(model>=0 && static_cast<std::size_t>(model)<cars.Count(),
         "Race colour selection model is out of range");
     std::int32_t selected=1;
     for (std::int32_t attempt=0;attempt<100;++attempt) {
@@ -1467,7 +1515,7 @@ public:
     std::uint32_t Header(std::uint32_t outputVersion=2) {
         BeginObject(nullptr);const auto format=String("format","NFSHP2 profile");
         const auto version=Scalar("version",outputVersion);const auto encoding=String("name_encoding","ISO-8859-1");
-        ProfileCheck(format=="NFSHP2 profile" && (version==1 || version==2) && encoding=="ISO-8859-1",
+        ProfileCheck(format=="NFSHP2 profile" && (version==1 || version==2 || version==3) && encoding=="ISO-8859-1",
             "Unsupported native text profile format, version or name encoding");
         return version;
     }
@@ -1550,6 +1598,7 @@ struct FrontendProfileStream {
     FrontendProfileStream* validated{};
     bool checkEventBindings{true};
     bool extendedNames{};
+    bool extendedMusic{false};
     std::string* primaryName{};
     std::array<std::array<std::unique_ptr<EventStateSnapshot>,256>,2> preparedEvents{};
     bool Reading() const noexcept {return mode!=Mode::Save && mode!=Mode::ExportText;}
@@ -1628,12 +1677,13 @@ struct FrontendProfileStream {
         Scalar("best_total_time_ticks",p.bestTotalTimeTicks);Scalar("best_lap_time_ticks",p.bestLapTimeTicks);End();
     }
     void Ride(CarAppearanceSelection& p) {
-        Object(nullptr);const auto model=Scalar("model",p.modelCode);ProfileCheck(model>=-1 && model<64,"Saved car model is outside the original profile table");
+        Object(nullptr);const auto model=Scalar("model",p.modelCode);ProfileCheck(model>=-1 && model<static_cast<std::int32_t>(CarInfoResource::NativeCarCapacity),"Saved car model is outside the native catalogue");
         Scalar("skin",p.skinNumber);Scalar("dashboard_textures",p.dashboardTextures);Scalar("variant",p.variant);Scalar("reserved",p.reserved);End();
     }
     void Player(FrontendPlayerInfo& p) {
-        Object(nullptr);Array("availability",p.availability.size());
-        for(auto& entry:p.availability) {
+        Object(nullptr);Array("availability",CarInfoResource::CarCount);
+        for(std::size_t model=0;model<CarInfoResource::CarCount;++model) {
+            auto& entry=p.availability[model];
             Object(nullptr);
             // Released GLOBALB contains status4 for several car variants.
             const auto status=Scalar("status",entry.status);ProfileCheck(status>=0 && status<=4,"Saved car availability status is invalid");
@@ -1643,6 +1693,7 @@ struct FrontendProfileStream {
         }
         End();Array("selected_rides",p.selectedRides.size());for(auto& ride:p.selectedRides)Ride(ride.appearance);End();
         Settings(p.settings);Scalar("total_points",p.totalPoints);End();
+        if(Applying())p.RefreshAdditionalCars();
     }
     void EventValue(EventStateSnapshot& state) {
         std::visit([&](auto& value) {
@@ -1726,8 +1777,10 @@ struct FrontendProfileStream {
         Scalar("race_aborted",f.raceAborted);Scalars("challenge_damage",f.savedChallengeOptions);
         Array("record_player_names",f.recordPlayerNames.size());for(auto& name:f.recordPlayerNames)PlayerName(nullptr,name.data());End();
         auto& music=f.musicSettings;FrontendMusicSettings incomingAudio;
-        Object("audio");Array("playlist",music.rows.size());
-        for(std::size_t index=0;index<music.rows.size();++index) {
+        const auto playlistRows=extendedMusic?music.rows.size():std::size_t{32};
+        Object("audio");Array("playlist",playlistRows);
+        if(Applying() && !extendedMusic)for(std::size_t i=32;i<music.rows.size();++i)music.rows[i]={};
+        for(std::size_t index=0;index<playlistRows;++index) {
             auto& row=music.rows[index];auto& incoming=incomingAudio.rows[index];
             Object(nullptr);incoming.group=Scalar("group",row.group);incoming.track=Scalar("track",row.track);
             incoming.status=Scalar("status",row.status);incoming.genreBit=Scalar("genre_bit",row.genreBit);End();
@@ -1740,7 +1793,19 @@ struct FrontendProfileStream {
         End();incomingAudio.savedAudioMode=Scalar("mode",music.savedAudioMode);End();
         // Scalar returns the incoming value in the non-mutating validation
         // pass. Checking live music here would incorrectly admit bad files.
-        ProfileCheck(nativeAudioProfileValid(incomingAudio,soundJukeboxPlayer.IsCartridgeLoaded()?&soundJukeboxPlayer:nullptr),
+        // Version3 may retain the optional A098 rows while its launcher
+        // option is off. Validate every scalar first, then allow only these
+        // known optional references to await catalogue synchronization.
+        ProfileCheck(nativeAudioProfileValid(incomingAudio),
+            "Saved audio options have invalid scalar domains");
+        auto catalogueAudio=incomingAudio;
+        if(extendedMusic && soundJukeboxPlayer.IsCartridgeLoaded())for(auto& row:catalogueAudio.rows) {
+            const bool optional=(row.group==0 && row.track>=23 && row.track<51) || (row.group==1 && row.track<2);
+            const bool present=static_cast<std::size_t>(row.group)<soundJukeboxPlayer.groups.size() &&
+                static_cast<std::size_t>(row.track)<soundJukeboxPlayer.groups[row.group].tunes.size();
+            if(optional && !present)row={};
+        }
+        ProfileCheck(nativeAudioProfileValid(catalogueAudio,soundJukeboxPlayer.IsCartridgeLoaded()?&soundJukeboxPlayer:nullptr),
             "Saved audio options have invalid volumes, mode or playlist references");
         auto& stats=f.transientStats;Object("race_results");const auto statsCount=Scalar("count",stats.count);
         ProfileCheck(statsCount>=0 && statsCount<=8,"Saved results exceed eight actual racer rows");
@@ -1812,7 +1877,7 @@ struct FrontendProfileStream {
         auto& navigation=f.musicSettings.menuState;Object("music_navigation");
         const auto playlist=Scalar("playlist",navigation[0]),song=Scalar("song",navigation[1]);
         Scalar("scroll_position",navigation[2]);const auto genre=Scalar("genre",f.musicSettings.menuMode);End();
-        ProfileCheck(playlist>=0 && playlist<20 && song>=0 && song<32 && genre<6,
+        ProfileCheck(playlist>=0 && playlist<32 && song>=0 && song<64 && genre<6,
             "Saved music navigation index exceeds its original backing array");
     }
     void Joysticks(FrontendPlayerManager& f) {
@@ -1833,18 +1898,18 @@ std::size_t ValidateProfileEnvelope(const void* data,std::size_t bytes)
     ProfileCheck(saveGameIsValid(image,bytes)!=0,"Native profile size/checksum does not match its stored image");
     const auto version=loadWord(image+12);
     ProfileCheck(loadWord(image)==bytes && !std::memcmp(image+4,"NFRED57",8) &&
-        ((version==1 && bytes==GAME_SAVE_SIZE) || (version==2 && bytes==ExtendedProfileSize)),
+        ((version==1 && bytes==GAME_SAVE_SIZE) || ((version==2 || version==3) && bytes==ExtendedProfileSize)),
         "Unsupported native profile version; raw PS2 memory images are not this native format");
     const auto checksumOffset=bytes-4;
     const auto end=loadWord(image+16);ProfileCheck(end>=20 && end<=checksumOffset,"Saved payload length is invalid");
     for(std::size_t i=end;i<checksumOffset;++i)ProfileCheck(image[i]==0,"Native profile reserved bytes are not zero");
     return end;
 }
-void ProfileEnvelope(FrontendPlayerManager::NativeProfileImage& image,std::size_t end,bool extendedNames)
+void ProfileEnvelope(FrontendPlayerManager::NativeProfileImage& image,std::size_t end,bool extendedNames,bool extendedMusic)
 {
     const auto size=extendedNames?image.size():GAME_SAVE_SIZE;
     storeWord(image.data(),static_cast<std::uint32_t>(size));
-    std::memcpy(image.data()+4,"NFRED57",8);storeWord(image.data()+12,extendedNames?2u:1u);
+    std::memcpy(image.data()+4,"NFRED57",8);storeWord(image.data()+12,extendedMusic?3u:extendedNames?2u:1u);
     storeWord(image.data()+16,static_cast<std::uint32_t>(end));
     ProfileCheck(saveGameFinalize(image.data(),size)!=0,"Native profile checksum finalization failed");
 }
@@ -1852,10 +1917,10 @@ FrontendPlayerManager::NativeProfileImage ParseTextProfile(const void* data,std:
 {
     FrontendProfileJson json(data,bytes);const auto version=json.Header();FrontendPlayerManager::NativeProfileImage image{};
     FrontendProfileStream stream{FrontendProfileStream::Mode::ImportText,image.data(),nullptr};stream.json=&json;stream.checkEventBindings=checkEventBindings;
-    stream.extendedNames=version==2;
+    stream.extendedNames=version>=2;stream.extendedMusic=version>=3;
     if(stream.extendedNames)stream.limit=ExtendedProfileSize-4;
     stream.Run(owner);json.End();
-    ProfileEnvelope(image,stream.position,stream.extendedNames);return image;
+    ProfileEnvelope(image,stream.position,stream.extendedNames,stream.extendedMusic);return image;
 }
 }
 
@@ -1865,7 +1930,7 @@ FrontendPlayerManager::NativeProfileImage FrontendPlayerManager::SerializeNative
     FrontendProfileStream stream{FrontendProfileStream::Mode::Save,image.data(),nullptr};
     stream.extendedNames=true;stream.limit=ExtendedProfileSize-4;
     stream.Run(const_cast<FrontendPlayerManager&>(*this));
-    ProfileEnvelope(image,stream.position,true);return image;
+    ProfileEnvelope(image,stream.position,true,true);return image;
 }
 
 bool FrontendPlayerManager::DeserializeNativeProfile(const void* data,std::size_t bytes,std::string& error)
@@ -1874,13 +1939,13 @@ bool FrontendPlayerManager::DeserializeNativeProfile(const void* data,std::size_
     try {
         const auto end=ValidateProfileEnvelope(data,bytes);const auto* image=static_cast<const std::uint8_t*>(data);
         FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};
-        validate.extendedNames=loadWord(image+12)==2;validate.Run(*this);
+        validate.extendedNames=loadWord(image+12)>=2;validate.extendedMusic=loadWord(image+12)>=3;validate.Run(*this);
         ProfileCheck(validate.position==end,"Saved native profile has trailing fields from a different schema");
         // Every absent typed event cell is allocated during validation. The
         // final traversal only assigns scalars and moves prepared owners;
         // failures cannot leave half a loaded profile or invalidate borrowers.
         FrontendProfileStream commit{FrontendProfileStream::Mode::Commit,nullptr,image,20,end};
-        commit.validated=&validate;commit.extendedNames=validate.extendedNames;commit.Run(*this);
+        commit.validated=&validate;commit.extendedNames=validate.extendedNames;commit.extendedMusic=validate.extendedMusic;commit.Run(*this);
         return true;
     } catch(const std::exception& e) {error=e.what();return false;}
 }
@@ -1899,7 +1964,7 @@ bool FrontendPlayerManager::ValidateNativeProfileText(const void* data,std::size
         auto& owner=const_cast<FrontendPlayerManager&>(*this);const auto image=ParseTextProfile(data,bytes,owner,false);
         const auto end=ValidateProfileEnvelope(image.data(),loadWord(image.data()));
         FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image.data(),20,end};
-        validate.checkEventBindings=false;validate.primaryName=playerName;validate.extendedNames=loadWord(image.data()+12)==2;validate.Run(owner);
+        validate.checkEventBindings=false;validate.primaryName=playerName;validate.extendedNames=loadWord(image.data()+12)>=2;validate.extendedMusic=loadWord(image.data()+12)>=3;validate.Run(owner);
         ProfileCheck(validate.position==end,"Saved text profile has an incomplete logical payload");return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }
@@ -1918,11 +1983,11 @@ bool FrontendPlayerManager::ConvertLegacyProfileToText(const void* data,std::siz
         const auto end=ValidateProfileEnvelope(data,bytes);const auto* image=static_cast<const std::uint8_t*>(data);
         auto& owner=const_cast<FrontendPlayerManager&>(*this);
         FrontendProfileStream validate{FrontendProfileStream::Mode::Validate,nullptr,image,20,end};
-        validate.extendedNames=loadWord(image+12)==2;validate.Run(owner);
+        validate.extendedNames=loadWord(image+12)>=2;validate.extendedMusic=loadWord(image+12)>=3;validate.Run(owner);
         ProfileCheck(validate.position==end,"Legacy profile has trailing fields from a different schema");
-        FrontendProfileJson json(false);json.Header(validate.extendedNames?2u:1u);
+        FrontendProfileJson json(false);json.Header(validate.extendedMusic?3u:validate.extendedNames?2u:1u);
         FrontendProfileStream stream{FrontendProfileStream::Mode::ExportLegacyText,nullptr,image,20,end};
-        stream.json=&json;stream.extendedNames=validate.extendedNames;stream.Run(owner);json.End();
+        stream.json=&json;stream.extendedNames=validate.extendedNames;stream.extendedMusic=validate.extendedMusic;stream.Run(owner);json.End();
         text=json.Finish();return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }

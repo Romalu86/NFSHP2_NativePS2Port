@@ -207,24 +207,24 @@ std::int32_t GetNumCarsUnlocked(const FrontendPlayerManager& frontend,
 {
     std::int32_t count=0;
     for(const auto& car:cars.Cars())
-        if(car.bodyCategory==usage && (IsCarUnlocked(frontend,events,car.modelCode,-1) || car.challengeAvailability==0))++count;
+        if((car.originalModelCode<0 || cars.IsAvailable(car.modelCode)) && car.bodyCategory==usage && (car.originalModelCode>=0 || IsCarUnlocked(frontend,events,car.modelCode,-1) || car.challengeAvailability==0))++count;
     return count;
 }
 std::int32_t GetNumCarsAvailable(const CarInfoResource& cars,std::int32_t usage)
 {
-    std::int32_t count=0;for(const auto& car:cars.Cars())if(car.bodyCategory==usage)++count;return count;
+    std::int32_t count=0;for(const auto& car:cars.Cars())if((car.originalModelCode<0 || cars.IsAvailable(car.modelCode)) && car.bodyCategory==usage)++count;return count;
 }
 std::int32_t GetNumCopCarsUnlocked(const FrontendPlayerManager& frontend,
     const CarInfoResource& cars,const EventTreeResources* events)
 {
     std::int32_t count=0;
-    for(const auto& car:cars.Cars())if(car.bodyCategory==1 && (car.pursuitAvailability==0 ||
+    for(const auto& car:cars.Cars())if((car.originalModelCode<0 || cars.IsAvailable(car.modelCode)) && car.bodyCategory==1 && (car.originalModelCode>=0 || car.pursuitAvailability==0 ||
         (car.pursuitAvailability==1 && IsCarUnlocked(frontend,events,car.modelCode,7))))++count;
     return count;
 }
 std::int32_t GetNumCopCarsAvailable(const CarInfoResource& cars)
 {
-    std::int32_t count=0;for(const auto& car:cars.Cars())if(car.bodyCategory==1)++count;return count;
+    std::int32_t count=0;for(const auto& car:cars.Cars())if((car.originalModelCode<0 || cars.IsAvailable(car.modelCode)) && car.bodyCategory==1)++count;return count;
 }
 std::string FormatRewardPoints(std::int32_t points,const LanguageManager& language)
 {

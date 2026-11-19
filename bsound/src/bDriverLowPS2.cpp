@@ -770,10 +770,12 @@ struct bSound::NativeDevice {
     IXAudio2MasteringVoice* master{};
     struct RadioCallbacks final : IXAudio2EngineCallback {
         std::atomic<bool> failed{false};
+        std::atomic<HRESULT> result{S_OK};
         void STDMETHODCALLTYPE OnProcessingPassStart() noexcept override {}
         void STDMETHODCALLTYPE OnProcessingPassEnd() noexcept override {}
-        void STDMETHODCALLTYPE OnCriticalError(HRESULT) noexcept override {failed=true;}
-    } radioCallbacks;
+        void STDMETHODCALLTYPE OnCriticalError(HRESULT error) noexcept override {result=error;failed=true;}
+    } radioCallbacks,mainCallbacks;
+    bool mainCallbacksRegistered{};
     IXAudio2* radioEngine{};
     IXAudio2MasteringVoice* radioMaster{};
     std::wstring radioController;
@@ -794,14 +796,17 @@ struct bSound::NativeDevice {
     ~NativeDevice()
     {
         if (std::this_thread::get_id()!=thread)std::terminate();
-        // Stop the Wine audio worker before retiring the voices it uses.
-        if (wineAudio && engine)engine->StopEngine();
+        // Join native processing before retiring the voices and their buffers.
+        if (engine)engine->StopEngine();
         for (auto& voice:voices)destroy(voice);
         closeRadio();
         // Sources must release their actual send destinations first.
         for (auto& effect:effects)if(effect.device)effect.device->DestroyVoice();
         if (master)master->DestroyVoice();
-        if (engine)engine->Release();
+        if (engine) {
+            if(mainCallbacksRegistered)engine->UnregisterForCallbacks(&mainCallbacks);
+            engine->Release();
+        }
         if (com)CoUninitialize();
     }
     void detachRadio(Voice& voice) noexcept
@@ -872,7 +877,9 @@ struct bSound::NativeDevice {
     }
     static void checked(HRESULT result,const char* reason)
     {
-        if (FAILED(result))throw Failure{WORLD_AUDIO_BACKEND_FAILURE,result,reason};
+        if (FAILED(result))throw Failure{
+            result==XAUDIO2_E_DEVICE_INVALIDATED || result==HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ?
+                WORLD_AUDIO_NO_OUTPUT_DEVICE:WORLD_AUDIO_BACKEND_FAILURE,result,reason};
     }
     static void required(WorldAudioResult result,const char* reason)
     {
@@ -1316,6 +1323,10 @@ struct bSound::NativeDevice {
             if (engine)throw Failure{WORLD_AUDIO_INVALID_BINDING,E_FAIL,"Device was initialized twice"};
             checked(hp2::audio::InitializeNativeAudioCom(),"COM initialization failed");com=true;
             checked(XAudio2Create(&engine,0,XAUDIO2_DEFAULT_PROCESSOR),"XAudio2 engine creation failed");
+            if(!wineAudio) {
+                checked(engine->RegisterForCallbacks(&mainCallbacks),"XAudio2 output callback registration failed");
+                mainCallbacksRegistered=true;
+            }
             // The native endpoint uses two channels at 48 kHz; every
             // source retains its actual authored rate.
             if (wineAudio) {
@@ -1327,6 +1338,12 @@ struct bSound::NativeDevice {
                 XAUDIO2_EFFECT_CHAIN clockChain{1,&clockDescriptor};
                 const auto masterResult=engine->CreateMasteringVoice(&master,2,48000,0,nullptr,&clockChain,AudioCategory_GameEffects);
                 clockEffect->Release(); // The real mastering voice owns its COM reference.
+                // Windows reports ERROR_NOT_FOUND when every playback
+                // endpoint is disconnected/disabled. Let startup select the
+                // existing no-sound mode after this device has been retired.
+                // Other COM, engine and resource errors remain fatal.
+                if(masterResult==HRESULT_FROM_WIN32(ERROR_NOT_FOUND))
+                    throw Failure{WORLD_AUDIO_NO_OUTPUT_DEVICE,masterResult,"No active Windows audio output device"};
                 checked(masterResult,"Windows physical mastering endpoint creation failed");
             }
             initializeEffects();
@@ -1571,6 +1588,7 @@ struct bSound::NativeDevice {
             return WORLD_AUDIO_STALE_REFERENCE;
         if (library.windowsFailure_.result!=WORLD_AUDIO_OK)return library.windowsFailure_.result;
         try {
+            if(mainCallbacks.failed)checked(mainCallbacks.result.load(),"Windows audio output was disconnected");
             // Native buffer progress is independent of a logical game tick.
             // This never advances world/input clocks or invents readiness.
             for (auto& voice:voices)if (voice.device) {
@@ -1673,7 +1691,18 @@ WorldAudioResult bSound::SetWindowsMasterVolume(float gain)
 {
     if(!windowsDevice_ || !windowsDevice_->master || gain<0.0f || gain>1.0f || !std::isfinite(gain))
         return WORLD_AUDIO_INVALID_BINDING;
-    if(FAILED(windowsDevice_->master->SetVolume(gain)))return WORLD_AUDIO_RESOURCE_FAILURE;
+    const auto applied=windowsDevice_->master->SetVolume(gain);
+    if(FAILED(applied)) {
+        const auto result=applied==XAUDIO2_E_DEVICE_INVALIDATED || applied==HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ?
+            WORLD_AUDIO_NO_OUTPUT_DEVICE:WORLD_AUDIO_RESOURCE_FAILURE;
+        windowsFailure_={result,WORLD_AUDIO_SET_CHANNEL_VOLUME,0,static_cast<int32_t>(applied),"Windows master volume failed"};
+        if(result==WORLD_AUDIO_NO_OUTPUT_DEVICE) {
+            const auto failure=windowsFailure_;
+            const auto closed=CloseWindowsDevice();windowsFailure_=failure;
+            if(closed!=WORLD_AUDIO_OK)return closed;
+        }
+        return result;
+    }
     windowsDevice_->masterGain=gain;
     windowsDevice_->applyRadioGain();
     return WORLD_AUDIO_OK;
@@ -1688,7 +1717,14 @@ void bSound::SetWindowsRadioController(std::wstring_view container,float gain)
 WorldAudioResult bSound::PumpWindowsDevice(size_t maximumOperations)
 {
     if (!windowsDevice_)return WORLD_AUDIO_INVALID_BINDING;
-    return windowsDevice_->pump(maximumOperations);
+    const auto result=windowsDevice_->pump(maximumOperations);
+    if(result==WORLD_AUDIO_NO_OUTPUT_DEVICE) {
+        const auto failure=windowsFailure_;
+        const auto closed=CloseWindowsDevice();
+        windowsFailure_=failure;
+        if(closed!=WORLD_AUDIO_OK)return closed;
+    }
+    return result;
 }
 
 

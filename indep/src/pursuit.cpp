@@ -126,9 +126,11 @@ WorldServicesResult pursuitGroupReadExactDescription(const PursuitCollisionGroup
         !group->target->bindings.owner || !group->target->bindings.owner->driverInfo)
         return WORLD_SERVICES_INVALID_BINDING;
     const auto* resources=group->owner->bindings->carResources;
-    const int32_t model=group->target->bindings.owner->driverInfo->appearance.modelCode;
+    const int32_t selectedModel=group->target->bindings.owner->driverInfo->appearance.modelCode;
+    int32_t model=selectedModel;
     if(!resources || !resources->CarsLoaded() || model<0 || static_cast<size_t>(model)>=resources->Cars().size())
         return WORLD_SERVICES_INVALID_BINDING;
+    model=resources->OriginalModel(static_cast<std::size_t>(selectedModel));
     if(resources->Car(static_cast<size_t>(model)).bodyCategory==1){*description=0x10000000;return WORLD_SERVICES_OK;}
     if(model==15 || model==16 || model==22){*description=-1;return WORLD_SERVICES_OK;}
     if(model==5 || model==6 || model==13 || model==14 || model==43 || model==44){

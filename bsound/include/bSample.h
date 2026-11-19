@@ -240,7 +240,10 @@ typedef enum WorldAudioResult {
     WORLD_AUDIO_CAPACITY,
     WORLD_AUDIO_STALE_REFERENCE,
     WORLD_AUDIO_RESOURCE_FAILURE,
-    WORLD_AUDIO_BACKEND_FAILURE
+    WORLD_AUDIO_BACKEND_FAILURE,
+    /* Native startup policy: no active host output endpoint. This is not
+     * a successful device initialization or a failed game resource. */
+    WORLD_AUDIO_NO_OUTPUT_DEVICE
 } WorldAudioResult;
 
 struct GameSession;

@@ -65,6 +65,7 @@ struct CarAppearance {
     std::vector<CarLightFlare> flares;
     const hp2::CarDefinition* definition{};
     const hp2::CarRenderBindings* bindings{};
+    std::string bodyGeometryBaseName;
     EditorMarkerTexture* shadowTexture{};
     EditorMarkerTexture* auxiliaryTexture{};
     const EditorMarkerLightMaterial* lightMaterial{};
@@ -93,6 +94,7 @@ std::size_t carRenderNativeDetailLod(const EditorMarkerModel* models,
 }
 
 namespace {
+void carAppearanceSelectBodyGeometry(CarAppearance& render);
 void carAppearanceApplySelection(CarAppearance* appearance, CarAppearanceSelection* selection)
 {
     appearance->selection = selection;
@@ -160,6 +162,7 @@ CarAppearanceResult carSwitchSkin(Car* car, int32_t skinNumber)
     std::memcpy(&car->driverInfo->appearance.skinNumber, &byte, sizeof(byte));
     try {
         carAppearanceApplySelection(car->appearance, &car->driverInfo->appearance);
+        carAppearanceSelectBodyGeometry(*car->appearance);
         carAppearanceUpdateSkinTextures(car->appearance);
         return CAR_APPEARANCE_OK;
     } catch (...) { return CAR_APPEARANCE_INVALID_SELECTION; }
@@ -632,6 +635,51 @@ std::string carModelName(const hp2::CarDefinition& definition,const char* suffix
     // in this constructor. Official HP reward cars share the base geometry.
     return definition.baseName+suffix;
 }
+void carAppearanceSelectBodyGeometry(CarAppearance& render)
+{
+    const auto& selection=*render.selection;
+    const auto& definition=*render.definition;
+    const auto* skin=render.info->FindSkin(selection.modelCode,selection.skinNumber,true);
+    hp2::Require(skin,"Car body has no authored paint selection");
+    const auto& base=skin->bodyGeometryBaseName.empty() ? definition.baseName:skin->bodyGeometryBaseName;
+    if(render.bodyGeometryBaseName==base)return;
+    auto& resources=render.textures->Models();
+    const bool replacing=!render.bodyGeometryBaseName.empty();
+    for(std::size_t lod=0;lod<4;++lod) {
+        const char letter=static_cast<char>('A'+lod-(definition.bodyCategory==2 && lod ? 1:0));
+        std::string name=base+'_'+letter;
+        if(selection.reserved && selection.variant && lod<2)name+=std::to_string(selection.variant);
+        // PAL damage updates decoded positions/colours in place. A live
+        // skin change transfers that state, retaining the target's own UVs.
+        // Reapplying BodyDamage here would use its already-applied delta.
+        std::vector<EditorMarkerSolidGeometry::Strip> previous;
+        if(replacing && render.models[lod].solid && render.models[lod].solid->geometry)
+            previous=render.models[lod].solid->geometry->strips;
+        editorMarkerModelDispose(&render.models[lod]);
+        editorMarkerModelInitialize(&render.models[lod],&resources,hashString(name.c_str()));
+        hp2::Require(skin->bodyGeometryBaseName.empty() || render.models[lod].solid,
+            "Paint-specific production body geometry is not loaded");
+        if(!previous.empty()) {
+            auto& current=render.models[lod].solid->geometry->strips;
+            hp2::Require(current.size()==previous.size(),"Paint switch changed damage strip topology");
+            for(std::size_t i=0;i<current.size();++i) {
+                hp2::Require(current[i].positions.size()==previous[i].positions.size(),
+                    "Paint switch changed damage vertex ordinals");
+                current[i].positions=std::move(previous[i].positions);
+                current[i].colors=std::move(previous[i].colors);
+                current[i].flags=previous[i].flags;
+                current[i].StampNativeVertexRevision();
+            }
+        }
+        if(lod>=2 && definition.bodyCategory!=2)
+            (void)editorMarkerModelRenameTexture(&render.models[lod],render.used.defaultSkinKeys[0],render.used.defaultSkinKeys[1]);
+        auto* table=lod<3 ? render.bodyReplacements.data():render.genericReplacements.data();
+        const auto count=lod<3 ? render.bodyReplacements.size():render.genericReplacements.size();
+        editorMarkerModelAttachReplacementTextures(&render.models[lod],table,
+            static_cast<std::int32_t>(count),lod<3 ? static_cast<std::int32_t>(lod):0);
+    }
+    render.bodyGeometryBaseName=base;
+}
 void carRenderConstruct(Car* car,CarAppearanceSelection& ride,CarAppearance& render,
     const hp2::CarRenderBindings& binding)
 {
@@ -672,16 +720,7 @@ void carRenderConstruct(Car* car,CarAppearanceSelection& ride,CarAppearance& ren
     const auto material=[&](std::size_t slot) {
         editorMarkerModelReplaceLightMaterial(&render.models[slot],0xd6d6080au,skin->lightMaterialKey);
     };
-    for (std::size_t lod=0;lod<4;++lod) {
-        const char letter=static_cast<char>('A'+lod-(definition.bodyCategory==2 && lod ? 1:0));
-        std::string name=definition.baseName+'_'+letter;
-        if (selection.reserved && selection.variant && lod<2)name+=std::to_string(selection.variant);
-        initialize(lod,name);
-        if (lod>=2 && definition.bodyCategory!=2)
-            (void)editorMarkerModelRenameTexture(&render.models[lod],render.used.defaultSkinKeys[0],render.used.defaultSkinKeys[1]);
-        if (lod<3)attach(lod,render.bodyReplacements,static_cast<std::int32_t>(lod));
-        else attach(lod,render.genericReplacements,0);
-    }
+    carAppearanceSelectBodyGeometry(render);
     // Source initializes all three front handles, then all three rear handles.
     std::string frontNames[3];
     for (std::size_t lod=0;lod<3;++lod) {

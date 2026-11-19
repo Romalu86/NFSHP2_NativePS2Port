@@ -107,7 +107,6 @@
     <ClInclude Include="..\indep\inc\DrivingLocation.hpp" />
     <ClInclude Include="..\indep\inc\Ecstasy.hpp" />
     <ClInclude Include="..\indep\inc\NativeRenderSettings.hpp" />
-    <ClInclude Include="..\src\NativeConfigurator.inl" />
     <ClInclude Include="..\indep\inc\Engine.hpp" />
     <ClInclude Include="..\indep\inc\EventTree.hpp" />
     <ClInclude Include="..\indep\inc\FEAnim.hpp" />

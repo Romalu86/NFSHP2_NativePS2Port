@@ -1037,21 +1037,31 @@ void FlailerResources::AddNativeAudioMaster(std::uint32_t screen)
     auto handle=std::make_unique<FlailerBitmapChunk>(*marker);
     handle->key=hashString("PC_MASTER_MARKER");handle->strip=nullptr;handle->parentKey=group;
     root.text.reserve(root.text.size()+1);bundle->text.reserve(bundle->text.size()+1);
-    auto mask=std::make_unique<FlailerBitmapChunk>(*firstMask);
-    mask->key=hashString("MI_0_MASK");mask->strip=nullptr;mask->parentKey=group;
+    // SlideIn/SlideOut resolve MI_0_MASK as the authored-style anchor of
+    // MENUITEM_0_GROUP. Keep that anchor without adding an eighth backdrop.
+    auto anchor=std::make_unique<FlailerBitmapChunk>(*firstMask);
+    anchor->key=hashString("MI_0_MASK");anchor->strip=nullptr;anchor->parentKey=group;
+    anchor->visible=0;anchor->SetClipToPoly(0xc67cfb4au);
     root.bitmaps.reserve(root.bitmaps.size()+3);bundle->bitmaps.reserve(bundle->bitmaps.size()+3);
     for(auto* object=page->objects.next;object!=&page->objects;object=object->next) {
+        // Seven stationary row masks belong to the list viewport, not to its
+        // scrolling contents. Extra authored offscreen masks must not cover
+        // the hint strip below that viewport.
+        if(std::strncmp(object->name.data(),"MI_",3)==0 &&
+            std::strstr(object->name.data(),"_MASK")) {
+            object->SetClipToPoly(0xc67cfb4au);
+            continue;
+        }
         if(object->parentKey==0x457755c9u)continue;
         if(object->topLeftY>=70.0f && object->topLeftY<450.0f &&
            (object->parentKey==0xa6bbd61fu || object->clipObjectKey==0xc67cfb4au ||
             std::strncmp(object->name.data(),"MENUITEM_",9)==0 ||
             std::strncmp(object->name.data(),"AUDIO_BAR",9)==0 ||
-            std::strncmp(object->name.data(),"MI_",3)==0 ||
             object->key==0x2932dfcau))object->SetTopLeftY(object->topLeftY+37.0f);
     }
     appendObject(*page,*text);++page->textCount;
     bundle->text.push_back(text.get());root.text.push_back(std::move(text));
-    for(auto* slider:{&base,&handle,&mask}) {
+    for(auto* slider:{&base,&handle,&anchor}) {
         appendObject(*page,**slider);++page->bitmapCount;
         bundle->bitmaps.push_back(slider->get());root.bitmaps.push_back(std::move(*slider));
     }
@@ -1204,7 +1214,7 @@ void FlailerResources::SetFittedText(std::uint32_t screen,std::uint32_t key,cons
     float left=4.0f,right=636.0f;
     int clipLeft{},clipTop{},clipRight{},clipBottom{};
     if(text->clipObjectKey && GetBoundingBox(screen,text->clipObjectKey,clipLeft,clipTop,clipRight,clipBottom,language)) {
-        left=static_cast<float>(clipLeft)+5.0f;right=static_cast<float>(clipRight)-2.0f;
+        left=std::max(left,static_cast<float>(clipLeft)+5.0f);right=std::min(right,static_cast<float>(clipRight)-2.0f);
     }
     if(const auto* next=followingColumn?FindObject(screen,followingColumn,1):nullptr) {
         float x{},y{};

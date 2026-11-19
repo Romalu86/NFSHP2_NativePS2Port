@@ -523,6 +523,19 @@ PhysicalResource GameResources::OpenPhysical(const std::string& logicalName) con
 }
 
 std::optional<PhysicalResource> GameResources::TryOpenPhysical(const std::string& logicalName) const {
+    const auto nativeName=NormalizePath(logicalName);
+    if(nativeName.compare(0,5,"EXTR/")==0 && !additionalCarsRoot_.empty()) {
+        Require(nativeName.find("..") == std::string::npos,"Additional car path escapes its content directory");
+        auto path=LoosePath(additionalCarsRoot_,nativeName.substr(5));
+        bool expanded=false;
+        if(path.empty() && nativeName.size()>4 && nativeName.compare(nativeName.size()-4,4,".LZC")==0) {
+            auto unpacked=nativeName.substr(5);unpacked.replace(unpacked.size()-4,4,".BUN");
+            path=LoosePath(additionalCarsRoot_,unpacked);expanded=!path.empty();
+        }
+        if(path.empty())return std::nullopt;
+        auto file=std::make_shared<RandomAccessFile>(path);
+        return PhysicalResource{FileRange(file,0,file->Size()),expanded};
+    }
     if (archive_) {
         const auto& matches=archive_->Find(logicalName);
         if (matches.empty())return std::nullopt;
@@ -571,6 +584,12 @@ std::optional<PhysicalResource> GameResources::TryOpenPhysical(const std::string
 
 std::vector<std::uint8_t> GameResources::Load(const std::string& logicalName) const {
     return LoadDecoded(OpenPhysical(logicalName).range);
+}
+
+void GameResources::MountAdditionalCars(const fs::path& directory) {
+    Require(additionalCarsRoot_.empty(),"Additional car content is already mounted");
+    Require(fs::is_directory(directory),"Additional car content directory is missing");
+    additionalCarsRoot_=fs::absolute(directory).lexically_normal();
 }
 
 } // namespace hp2

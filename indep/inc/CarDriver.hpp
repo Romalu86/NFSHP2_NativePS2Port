@@ -14,6 +14,8 @@ extern "C" {
 
 enum { JOYSTICK_PORT_COUNT = 2, JOYSTICK_SAMPLES = 32,
     JOYSTICK_PROFILE_DISCONNECTED = -1, JOYSTICK_PROFILE_GAMEPAD = 0x79,
+    // Keyboard connection identity; native actions have their own mapping.
+    JOYSTICK_PROFILE_KEYBOARD = 0x41,
     JOYSTICK_LAYOUT_E=60, JOYSTICK_LAYOUT_F=61, JOYSTICK_LAYOUT_G=62, JOYSTICK_LAYOUT_H=63 };
 
 typedef struct JoystickControls {
@@ -21,11 +23,12 @@ typedef struct JoystickControls {
     uint8_t sticks[4];             /* Right X/Y, left X/Y; centre 128. */
     uint8_t pressures[12];         /* Authored pressure-channel order. */
     int32_t mappingProfile;        /* Authored scanner profile, or -1. */
-    uint8_t keyboardDrivingLayout; /* Use authored layout A for physical driving keys. */
+    uint8_t keyboardDrivingLayout; /* Select native keyboard actions, independently of pad schemes. */
     uint16_t nativeDebugHeld;
     uint8_t nativeDebugSticks[4];
     uint8_t nativeDebugInput;
     uint8_t nativeHostInput, nativeMenuInput;
+    uint32_t nativeKeyboardActions; /* Saved keyboard slots0..19, Zone keys20..21. */
 } JoystickControls;
 
 typedef struct JoystickSample {
@@ -550,7 +553,7 @@ struct ControllerState {
     bool connected = false;
 };
 
-JoystickControls NativeScannerControls(const ControllerState& state) noexcept;
+JoystickControls NativeScannerControls(const ControllerState& state,bool keyboardDriving=false) noexcept;
 void SetButton(ControllerState& state, Ps2Button button, bool pressed,
                std::uint8_t pressure = 255) noexcept;
 std::uint8_t NormalizeAxis(std::int16_t signedValue) noexcept;
@@ -702,6 +705,8 @@ bool NativeKeyboardEnabled(const NativeInputSettings& settings,std::int32_t port
     bool split=false,bool gamepadConnected=false) noexcept;
 bool NativeGamepadEnabled(const NativeInputSettings& settings,std::int32_t port) noexcept;
 const std::array<std::uint16_t,20>& NativeKeyboardBindings(const NativeInputSettings& settings,std::int32_t port);
+std::uint32_t NativeKeyboardActions(const NativeInputSettings& settings,std::int32_t port,
+    const std::array<bool,256>& keys,bool focused);
 bool DetectNativeBinding(const NativePadSample& current,const NativePadSample& baseline,
     NativeInputBinding& binding,bool axisOnly=false) noexcept;
 std::string NativeBindingName(const NativeInputBinding& binding,bool standardized=true);

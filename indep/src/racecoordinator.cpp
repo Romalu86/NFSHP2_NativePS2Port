@@ -1365,7 +1365,11 @@ int32_t coordinatorInstantReplayMessage(GameSession& session,int32_t kind,intptr
     case 1: {
         if(owned.endScreens) {
             if(!replay.RestoreSnapshot("LAP_SNAPSHOT"))
-                if(!raceCoordinatorChangeState(&session,RC_STATE_POST_RACE))return 0;
+                return raceCoordinatorChangeState(&session,RC_STATE_POST_RACE);
+            // A background/highlight mismatch ends that playback attempt,
+            // not the intact recording. Retry only after a full valid rewind;
+            // worldReplaySynchronize still validates every following frame.
+            replay.State().desynchronized=0;replay.State().paused=0;
         } else {
             if(!replay.TakeSnapshot("THE_PRESENT") || !replay.RestoreSnapshot("INSTANT_REPLAY"))
                 return raceCoordinatorChangeState(&session,RC_STATE_PAUSE);
@@ -1404,7 +1408,7 @@ int32_t coordinatorInstantReplayMessage(GameSession& session,int32_t kind,intptr
         return 1;
     case 11:
         if(owned.endScreens)return raceCoordinatorChangeState(&session,RC_STATE_POST_RACE);
-        (void)replay.RestoreSnapshot("THE_PRESENT");
+        if(replay.RestoreSnapshot("THE_PRESENT"))replay.State().desynchronized=0;
         (void)replay.DeleteSnapshot("THE_PRESENT");
         return raceCoordinatorChangeState(&session,RC_STATE_PAUSE);
     case 13:return 1;

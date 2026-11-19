@@ -45,9 +45,10 @@ struct ProfileVisibleCars final {
     {
         Require(profile.cars && profile.language,"Visible car selection has no actual car/language resources");
         set.root.next=set.root.previous=&set.root;
+        profile.RefreshAdditionalCars(pursuit,frontend.UseTheRaceEvent());
         const auto* selected=profile.GetSelectedRideInfo(frontend.gameType);
         Require(selected!=nullptr,"Visible car selection has no selected profile ride");
-        for (std::int32_t model=0;model<64;++model) {
+        for (std::int32_t model=0;model<static_cast<std::int32_t>(profile.cars->Count());++model) {
             const auto& availability=profile.availability[static_cast<std::size_t>(model)];
             // Both authored rewards and the explicit PC traffic option use
             // this same profile availability owner. An unrelated beta
@@ -449,19 +450,25 @@ struct CarSelector::Storage {
         bitmap.ChangeTexture(key);
     }
     void CreateTrafficThumbnails() {
-        if(std::none_of(nodes.begin(),nodes.end(),[](const VisibleCar& car){return car.definition->bodyCategory==2;}))return;
+        if(std::none_of(nodes.begin(),nodes.end(),[](const VisibleCar& car){return car.definition->bodyCategory==2 || car.definition->originalModelCode>=0;}))return;
         auto& resources=*Ui().resources;auto* target=resources.FindScreen(screen);
         Require(target,"Traffic selector has no actual screen");
         const auto* object=resources.FindObject(screen,SelectCarIndexedKey("THUMBNAIL_CLOAK_%d",0),2);
         Require(object,"Traffic selector has no authored thumbnail layout");
         const auto& prototype=*static_cast<const FlailerBitmapChunk*>(object);
-        for(const auto& car:nodes)if(car.definition->bodyCategory==2 && !resources.FindObject(screen,car.thumbnailKey,2)) {
+        for(const auto& car:nodes)if((car.definition->bodyCategory==2 || car.definition->originalModelCode>=0) && !resources.FindObject(screen,car.thumbnailKey,2)) {
             nativeThumbnails.push_back(prototype);auto& bitmap=nativeThumbnails.back();
             bitmap.strip=nullptr;bitmap.next=bitmap.previous=nullptr;
             bitmap.key=car.thumbnailKey;bitmap.visible=0;bitmap.name.fill(0);
             const auto name="THUMBNAIL_"+car.definition->name;
             std::copy_n(name.c_str(),std::min(name.size(),bitmap.name.size()-1),bitmap.name.begin());
-            bitmap.ChangeTexture(TrafficIcon());
+            auto texture=TrafficIcon();
+            if(car.definition->originalModelCode>=0 && car.definition->bodyCategory!=2) {
+                const auto& donor=Frontend().players[0]->cars->Car(static_cast<std::size_t>(car.definition->originalModelCode));
+                if(const auto* original=resources.FindObject(screen,hashString(("THUMBNAIL_"+donor.name).c_str()),2))
+                    texture=static_cast<const FlailerBitmapChunk*>(original)->textureKey;
+            }
+            bitmap.ChangeTexture(texture);
             bitmap.next=&target->objects;bitmap.previous=target->objects.previous;
             bitmap.previous->next=&bitmap;target->objects.previous=&bitmap;
         }
@@ -475,7 +482,8 @@ struct CarSelector::Storage {
     {
         if(!loaded)return;
         const auto& type=*loaded->definition;
-        const float z=type.wheels[0].radius-type.wheels[0].position[2]+0.009999999776482582f;
+        const auto& visualWheels=type.originalModelCode>=0 ? type.nativeVisualWheels:type.wheels;
+        const float z=visualWheels[0].radius-visualWheels[0].position[2]+0.009999999776482582f;
         car.position[0]=0.0f;car.position[1]=0.0f;car.position[2]=reflected?-z:z;car.position[3]=0.0f;
         car.headlights=0;car.policeLights=0;
         eIdentity(car.orientation);
@@ -486,7 +494,7 @@ struct CarSelector::Storage {
             eIdentity(car.wheels[index]);eIdentity(car.brakes[index]);
             motionMatrixRotateY(car.wheels[index],car.wheels[index],0);
             if(index<2){motionMatrixRotateYaw(car.wheels[index],car.wheels[index],steering);motionMatrixRotateYaw(car.brakes[index],car.brakes[index],steering);}
-            for(std::size_t lane=0;lane<3;++lane)car.wheels[index][12+lane]=car.brakes[index][12+lane]=type.wheels[index].position[lane];
+            for(std::size_t lane=0;lane<3;++lane)car.wheels[index][12+lane]=car.brakes[index][12+lane]=visualWheels[index].position[lane];
             car.wheels[index][15]=car.brakes[index][15]=1.0f;
         }
     }
@@ -630,7 +638,9 @@ void CarSelector::SetupSwatches()
         const auto index=static_cast<std::size_t>(i);own.swatches[index]=SelectCarIndexedKey("SWATCH_%d",i);
         const auto* skin=own.services->menus->raceSetup->cars->FindSkin(car.definition->modelCode,car.availability->skinNumbers[index],car.definition->bodyCategory!=2);
         Require(skin,"Car selector swatch has no actual skin descriptor");
-        own.swatchUsesBodyTexture[index]=car.definition->bodyCategory==2;
+        // Added A098 traffic has explicit colour-token chips, just like its
+        // racers. A body atlas is not a colour swatch or a dashboard icon.
+        own.swatchUsesBodyTexture[index]=car.definition->bodyCategory==2 && car.definition->originalModelCode<0;
         own.swatchTextures[index]=own.swatchUsesBodyTexture[index] ?
             hashString((car.definition->baseName+"_SKIN"+std::to_string(skin->skinNumber)).c_str()):skin->colorSwatchTextureKey;
     }
@@ -768,15 +778,19 @@ void CarSelector::SetLogo()
         // The PC-only traffic catalogue has no manufacturer logo in the
         // authored racer UI. Do not replace CARLOGO with a '?' bitmap: hide
         // the real logo object/strip while retaining the Generic name label.
-        const std::string label="Generic "+car.name;
+        const std::string label=car.nativeDisplayName.empty() ? "Generic "+car.name:car.nativeDisplayName;
         resources.SetLocalizedText(own.screen,0x39e91754u,label.c_str());
         SetSelectCarGenericBranding(resources,own.screen,true);
         return;
     }
     SetSelectCarGenericBranding(resources,own.screen,false);
-    auto name=car.name;
+    auto name=car.originalModelCode>=0 ? own.services->menus->raceSetup->cars->Car(static_cast<std::size_t>(car.originalModelCode)).name:car.name;
+    // FRONTB retains the original M5HP/Z8HP/SpiderHP logos. Use that
+    // authored NFS branding, including the original split-screen overlay.
+    if(car.originalModelCode>=0 && car.pursuitConfiguration)
+        name=car.originalModelCode==21?(splitScreen?"SPIDER":car.name):name+"HP";
     if(splitScreen) {
-        if(car.pursuitConfiguration) {
+        if(car.pursuitConfiguration && name.size()>=2 && name.compare(name.size()-2,2,"HP")==0) {
             if(name=="SPIDERHP")name="SPIDERHP2P";else {Require(name.size()>=2,"Car logo authored name is shorter than its suffix");name.resize(name.size()-2);}
         } else if(car.bodyCategory==1) {
             if(name=="CROWNVIC")name="CROWNVICNOCOP";else if(name=="BMWM5COP")name="BMWM5";
@@ -846,7 +860,7 @@ void CarSelector::EnterOrbitMode()
         auto* manager=worldSpeechGetInstance();Require(manager && manager->messages && manager->messages->engine,
             "Car preview speech has no actual localized SPCH owner");
         auto* engine=manager->messages->engine;
-        const auto description=static_cast<std::uint32_t>(worldSpeechConvertCarTypeToDescription(car.modelCode));
+        const auto description=static_cast<std::uint32_t>(worldSpeechConvertCarTypeToDescription(car.originalModelCode>=0 ? car.originalModelCode:car.modelCode));
         if(car.bodyCategory==1)(void)spchAddEventV(engine,0xd3,&description,1);
         else {const std::uint32_t parameters[]{car.pursuitConfiguration?1u:0u,description};(void)spchAddEventV(engine,0x92,parameters,2);}
     }

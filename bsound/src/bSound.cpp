@@ -4,6 +4,7 @@
 #include "bware/inc/bFile.hpp"
 
 #include <cstdarg>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -493,6 +494,11 @@ WorldAudioResult bSound::SetCategoryVolume(uint32_t category,float volume)
 {
     if (category>=categoryVolumes_.size()) return WORLD_AUDIO_OK;
     if (!queue_) return WORLD_AUDIO_INVALID_BINDING;
+    if(queue_->spatialEnabled && !*queue_->spatialEnabled) {
+        if(!std::isfinite(volume) || volume<0.0f || volume>1.0f)return WORLD_AUDIO_INVALID_BINDING;
+        categoryVolumes_[category]=volume;
+        return WORLD_AUDIO_OK;
+    }
     size_t needed=1;
     for (size_t index=0;index<SampleCapacity();++index) {
         const auto& sample=*SampleAt(index);
@@ -517,6 +523,7 @@ WorldAudioResult bSound::SetMode(int32_t mode)
 {
     if (!queue_) return WORLD_AUDIO_INVALID_BINDING;
     if (mode<0 || mode>2) return WORLD_AUDIO_OK;
+    if(queue_->spatialEnabled && !*queue_->spatialEnabled)return WORLD_AUDIO_OK;
     return worldAudioSetMode(queue_,mode);
 }
 

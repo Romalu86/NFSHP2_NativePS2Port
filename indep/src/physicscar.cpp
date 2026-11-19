@@ -8,6 +8,8 @@
 #include "indep/inc/CarDamage.hpp"
 #include "indep/inc/Replay.hpp"
 #include "indep/inc/RealDriver.hpp"
+#include "indep/inc/AICarController.hpp"
+#include "indep/inc/Flags.hpp"
 #include "indep/inc/TrackedController.hpp"
 #include "bware/inc/bWare.hpp"
 
@@ -815,6 +817,12 @@ void physicsCarDampAirborneRotation(PhysicsCar* car)
 
 void physicsCarSetGripScale(PhysicsCar* car, float scale)
 {
+    // Use the same optional PC factor as the road target. The original
+    // CarState performance scale remains owned by Catch Up and snapshots.
+    const auto* movement=car->owner?static_cast<const CarMovement*>(car->owner->movement):nullptr;
+    const auto* driver=movement && movement->frame?movement->frame->environment.driver:nullptr;
+    if(driver && driver->kind==CAR_DRIVER_AI && driver->owner.ai)
+        scale=driverAINativeRacePerformanceScale(&driver->owner.ai->base,scale);
     float engineScale = scale;
     if (car->ownerMotion->disabledWheelMask && car->ownerMotion->collision->shape->contactCount)
         engineScale = scale * 0.4000000059604645f;
@@ -951,6 +959,7 @@ static void updateTractionAssist(PhysicsCar* car, float speedMph)
     float scale = (speedMph / tuning->tractionMaximumSpeed) * (1.0f - slipRatio);
     scale = scale * (1.0f - minimum);
     state->tractionAssistTime = tuning->tractionHoldSeconds;
+    state->tractionAssistDwell = 0.0f;
     state->tractionAssistScale = minimum + scale;
 }
 

@@ -136,10 +136,14 @@ public:
 
     // Decoding is explicit; normal file reads preserve compressed data.
     std::vector<std::uint8_t> Load(const std::string& logicalName) const;
+    // Add-only PC content. A distinct logical prefix cannot replace a file in
+    // the selected release source, and every queue keeps this same owner.
+    void MountAdditionalCars(const std::filesystem::path& directory);
 
 private:
     std::filesystem::path sourcePath_;
     std::filesystem::path looseRoot_;
+    std::filesystem::path additionalCarsRoot_;
     // Optional original extraction index; only physical-file metadata, not a
     // second game resource owner. Unknown names resolve through its hashes.
     std::filesystem::path looseIndexPath_;

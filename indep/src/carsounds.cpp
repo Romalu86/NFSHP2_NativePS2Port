@@ -624,7 +624,7 @@ const hp2::CarDefinition& playerCarDefinition(const CarMovement* movement,
     if (!movement || !movement->bindings.info || !bindings.cars || !bindings.cars->CarsLoaded())
         throw std::invalid_argument("Player car sound has no retained physical model");
     const int32_t model = movement->bindings.info->modelCode;
-    if (model < 0 || model >= 64)
+    if (model < 0 || static_cast<std::size_t>(model) >= bindings.cars->Count())
         throw std::invalid_argument("Player car sound model is outside the actual64-record resource");
     const auto& definition = bindings.cars->Car(static_cast<size_t>(model));
     if (movement->bindings.info->engine != &definition.engineInfo)

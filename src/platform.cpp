@@ -1028,20 +1028,22 @@ std::pair<DWORD,DWORD> NativeWindowsMonitorResolution(const NativeWindowsMonitor
     return desktop;
 }
 
-bool NativeWindowsModeFits(const DEVMODEW& mode,std::pair<DWORD,DWORD> extent) noexcept
+bool NativeWindowsModeFits(const DEVMODEW& mode) noexcept
 {
+    // Driver-scaled/virtual modes can exceed the panel's preferred size.
+    // Keep the renderer's limits, but do not cap modes to physical pixels.
     return mode.dmBitsPerPel>=32 && mode.dmPelsWidth>=320 && mode.dmPelsHeight>=240 &&
-        mode.dmPelsWidth<=std::min<DWORD>(16384,extent.first) && mode.dmPelsHeight<=std::min<DWORD>(16384,extent.second);
+        mode.dmPelsWidth<=16384 && mode.dmPelsHeight<=16384;
 }
 
-std::vector<DEVMODEW> NativeWindowsDisplayModes(const NativeWindowsMonitor& monitor,std::pair<DWORD,DWORD> extent)
+std::vector<DEVMODEW> NativeWindowsDisplayModes(const NativeWindowsMonitor& monitor)
 {
     const auto device=NativeWideText(monitor.displayName);
     std::vector<DEVMODEW> modes;
     for(DWORD index=0;;++index) {
         DEVMODEW mode{};mode.dmSize=sizeof(mode);
         if(!EnumDisplaySettingsExW(device.c_str(),index,&mode,0))break;
-        if(NativeWindowsModeFits(mode,extent)) {
+        if(NativeWindowsModeFits(mode)) {
             mode.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT|DM_BITSPERPEL|DM_DISPLAYFLAGS|DM_DISPLAYFREQUENCY;
             modes.push_back(mode);
         }
@@ -1051,15 +1053,14 @@ std::vector<DEVMODEW> NativeWindowsDisplayModes(const NativeWindowsMonitor& moni
 std::vector<std::pair<int,int>> NativeWindowsResolutions(const NativeWindowsMonitor& monitor)
 {
     const auto device=NativeWideText(monitor.displayName);
-    const auto extent=NativeWindowsMonitorResolution(monitor);
     std::vector<std::pair<int,int>> sizes;
     // The mode already in use is valid even when the desktop session
     // cannot submit a trial mode change (for example via a remote display).
     DEVMODEW current{};current.dmSize=sizeof(current);
     if(EnumDisplaySettingsExW(device.c_str(),ENUM_CURRENT_SETTINGS,&current,0) &&
-        NativeWindowsModeFits(current,extent))
+        NativeWindowsModeFits(current))
         sizes.emplace_back(static_cast<int>(current.dmPelsWidth),static_cast<int>(current.dmPelsHeight));
-    for(auto mode:NativeWindowsDisplayModes(monitor,extent)) {
+    for(auto mode:NativeWindowsDisplayModes(monitor)) {
         const auto size=std::make_pair(static_cast<int>(mode.dmPelsWidth),static_cast<int>(mode.dmPelsHeight));
         if(std::find(sizes.begin(),sizes.end(),size)==sizes.end() &&
             ChangeDisplaySettingsExW(device.c_str(),&mode,nullptr,CDS_TEST,nullptr)==DISP_CHANGE_SUCCESSFUL)
@@ -1083,7 +1084,9 @@ void NativeSetApplicationIcons(WNDCLASSEXW& windowClass)
 
 // Native launcher belongs to the proven Platform.cpp host. The game still
 // receives the source pad scanner, FRED settings and original Config cells.
-#include "NativeConfigurator.inl"
+#define HP2_NATIVE_CONFIGURATOR_IMPLEMENTATION
+#include "../indep/src/Config.cpp"
+#undef HP2_NATIVE_CONFIGURATOR_IMPLEMENTATION
 
 namespace {
 struct WindowsMenuPointer {
@@ -1483,7 +1486,7 @@ private:
         Require(EnumDisplaySettingsExW(device.c_str(),ENUM_CURRENT_SETTINGS,&current,0)!=FALSE,
             "Cannot read the desktop display mode");
         if(requested==std::make_pair(static_cast<int>(current.dmPelsWidth),static_cast<int>(current.dmPelsHeight)))return;
-        const auto modes=NativeWindowsDisplayModes(monitor,NativeWindowsMonitorResolution(monitor));
+        const auto modes=NativeWindowsDisplayModes(monitor);
         const auto desktopRate=static_cast<int>(activeDisplayMode_?desktopMode_.dmDisplayFrequency:current.dmDisplayFrequency);
         const auto score=[desktopRate](const DEVMODEW& mode) {
             return std::make_pair((mode.dmDisplayFlags&DM_INTERLACED)!=0,
@@ -1834,7 +1837,8 @@ int runNativeWindowsApplication(int argc,const wchar_t* const* argv)
             if(oversizedWindow || settings.fullscreenSize.first) {
                 const auto modes=NativeWindowsResolutions(monitor);
                 if(std::find(modes.begin(),modes.end(),settings.fullscreenSize)==modes.end())settings.fullscreenSize={};
-                if(oversizedWindow) {
+                if(oversizedWindow && std::find(modes.begin(),modes.end(),
+                    std::make_pair(settings.width,settings.height))==modes.end()) {
                     const auto size=modes.empty()?std::make_pair(static_cast<int>(std::clamp<DWORD>(nativeWidth,320,16384)),
                         static_cast<int>(std::clamp<DWORD>(nativeHeight,240,16384))):modes.back();
                     settings.width=size.first;settings.height=size.second;
@@ -1846,12 +1850,12 @@ int runNativeWindowsApplication(int argc,const wchar_t* const* argv)
         char graphicsOptions[512]{};
         std::snprintf(graphicsOptions,sizeof(graphicsOptions),"width=%d height=%d fullscreen=%d vsync=%d aa=%d "
             "filter=%d anisotropy=%d debug=%d unlock_all=%d skip_movies=%d controllers=%d,%d vibration=%d show_fps=%d "
-            "traffic_vehicles=%d disable_catch_up=%d cockpit_view=%d frame_limit=%d",
+            "traffic_vehicles=%d disable_catch_up=%d cockpit_view=%d frame_limit=%d stronger_opponents=%d",
             settings.width,settings.height,settings.fullscreen?1:0,settings.vsync?1:0,static_cast<int>(settings.antialiasing),
             static_cast<int>(settings.textureFilter),settings.anisotropy,settings.debugTools?1:0,settings.unlockAll?1:0,
             settings.skipMovies?1:0,settings.input.controller[0],settings.input.controller[1],settings.input.vibration?1:0,settings.showFps?1:0,
             settings.gameplay.trafficVehicles?1:0,settings.gameplay.disableCatchUp?1:0,settings.gameplay.cockpitView?1:0,
-            settings.frameLimit);
+            settings.frameLimit,settings.gameplay.strongerOpponents?1:0);
         crash.Event("graphics.options",graphicsOptions);
         applicationConfigureTesting(settings.debugTools,settings.unlockAll);
         applicationShowFrameRate=settings.showFps;
@@ -1908,12 +1912,12 @@ int runNativeWindowsApplication(int argc,const wchar_t* const* argv)
         if(!primaryFailureRecorded)savePrimaryFailure(error.what());
         auto message=NativeWideText(error.what());
         if(!failureReportSaved)message+=L"\n\nCould not save NFSHP2_error.txt.";
-        MessageBoxW(nullptr,message.c_str(),L"NFSHP2 — startup/runtime failure",MB_OK|MB_ICONERROR);
+        MessageBoxW(nullptr,message.c_str(),L"NFSHP2 вЂ” startup/runtime failure",MB_OK|MB_ICONERROR);
         return 1;
     } catch(...) {
         if(!primaryFailureRecorded)savePrimaryFailure("Non-standard native application exception");
         MessageBoxW(nullptr,L"Non-standard native application exception. See NFSHP2_error.txt.",
-            L"NFSHP2 — startup/runtime failure",MB_OK|MB_ICONERROR);
+            L"NFSHP2 вЂ” startup/runtime failure",MB_OK|MB_ICONERROR);
         return 1;
     }
 }

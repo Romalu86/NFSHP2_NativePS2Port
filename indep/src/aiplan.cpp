@@ -318,7 +318,13 @@ void driverAIActionSnapshot(DriverAIBase* driver,ReplaySnapshot* snapshot)
     int8_t present=driver->action?1:0;
     replaySnapshotMoveData(snapshot,&present,1,1,1);
     if(!present||snapshot->result!=REPLAY_SNAPSHOT_OK) {
-        // Source false branch intentionally leaves an existing pointer alone.
+        // PAL's pointer traversal leaves this slot untouched. The native
+        // heap owner survives a rewind, so an absent recorded action must
+        // retire a later action rather than keep following its future plan.
+        if(!present && snapshot->result==REPLAY_SNAPSHOT_OK && snapshot->restoring &&
+            snapshot->wireFormat==REPLAY_SNAPSHOT_NATIVE && snapshot->nativeStateVersion>=14) {
+            std::free(driver->action);driver->action=nullptr;
+        }
         replaySnapshotEndSection(snapshot);
         return;
     }

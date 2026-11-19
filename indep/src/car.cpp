@@ -878,7 +878,7 @@ Car::Car(RaceDriverInfo& selection,const float* initialPosition,uint16_t heading
         binding.frame->clock==binding.physics->clock && binding.collision->world==binding.frame->world &&
         binding.frame->spatial==binding.events && binding.render->applicationState==binding.movement->applicationState,
         "Car construction supplied different simulation/settings owners");
-    hp2::Require(selection.appearance.modelCode>=0 && selection.appearance.modelCode<64 &&
+    hp2::Require(selection.appearance.modelCode>=0 && static_cast<std::size_t>(selection.appearance.modelCode)<binding.render->cars->Count() &&
         &binding.render->cars->Car(static_cast<size_t>(selection.appearance.modelCode))==binding.definition,
         "Car constructor selection is not its canonical retained CarInfo");
     hp2::Require(std::isfinite(routeDistanceHint) && (!initialPosition ||
@@ -982,6 +982,7 @@ Car::Car(RaceDriverInfo& selection,const float* initialPosition,uint16_t heading
         // PAL1B54D4/1B54E4 bind BodyDamage and attachment markers to the
         // same CarTypeInfo+20 geometry name used by CarRenderInfo.
         data.damage=std::make_unique<CarDamage>(this,binding.definition->baseName.c_str());
+        data.damage->carType=static_cast<std::uint32_t>(binding.render->cars->OriginalModel(selection.appearance.modelCode));
         data.damage->body.settings=frame.environment.settings;
         live.damage=data.damage.get();motion.damage=live.damage;
     }
@@ -1055,6 +1056,14 @@ void Car::GetRenderingWheelAndBrakeMatrices(float wheels[4][16],float brakes[4][
     } else {
         std::memcpy(wheels,mover->bindings.state->wheelVisualTransform,4*16*sizeof(float));
         std::memcpy(brakes,mover->bindings.state->wheelMountTransform,4*16*sizeof(float));
+    }
+    if(ownedState && ownedState->render.cars && driverInfo) {
+        const auto& type=ownedState->render.cars->Car(static_cast<std::size_t>(driverInfo->appearance.modelCode));
+        if(type.originalModelCode>=0)for(std::size_t wheel=0;wheel<4;++wheel)
+            for(std::size_t axis=0;axis<3;++axis) {
+                const auto offset=type.nativeVisualWheels[wheel].position[axis]-type.wheels[wheel].position[axis];
+                wheels[wheel][12+axis]+=offset;brakes[wheel][12+axis]+=offset;
+            }
     }
 }
 void Car::BindWorldServices(ReplayManager* replay,PursuitManager* pursuit,Chopper* chopper) noexcept

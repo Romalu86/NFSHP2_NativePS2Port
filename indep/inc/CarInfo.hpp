@@ -107,6 +107,12 @@ struct CarGaugeInfo {
 };
 
 struct CarDefinition {
+    // Optional native content owns different meshes/UVs/keys. Its production
+    // physics donor is explicit; the original 64 definitions are never edited.
+    std::int32_t originalModelCode{-1};
+    std::string nativeDisplayName;
+    std::string presentationName; // Gauge artwork belongs to the production car, not the mod namespace.
+    std::array<CarWheel,4> nativeVisualWheels{};
     std::string name;
     std::string baseName;
     std::string manufacturer;
@@ -184,10 +190,13 @@ struct CarSkin {
     std::uint32_t selectionMask = 0;
     std::uint32_t lightMaterialKey{}; // final SkinInfo+2C, not a texture
     std::uint32_t colorSwatchTextureKey{}; // PAL SkinInfo+30
+    // Optional PC addon: paint-specific UV layout on private production
+    // body solids. Physics, detachable parts and stock skins keep their owner.
+    std::string bodyGeometryBaseName;
 };
 
 struct CarSkinChoices {
-    std::array<std::int8_t, 8> numbers{};
+    std::array<std::int8_t, 10> numbers{};
     std::uint8_t count = 0;
 };
 
@@ -197,6 +206,7 @@ struct CarSkinChoices {
 class CarInfoResource final {
 public:
     static constexpr std::size_t CarCount = 64;
+    static constexpr std::size_t NativeCarCapacity = 68;
     static constexpr std::uint32_t CarChunk = 0x34600;
     static constexpr std::uint32_t SkinChunk = 0x34601;
 
@@ -241,6 +251,9 @@ public:
         bool allowCutTraffic=false) const;
     CarLanguageInfo* FindCarLanguageInfo(std::int32_t modelCode);
     void InitCarInfo();
+    void LoadAdditionalCars(const std::vector<std::uint8_t>& package);
+    std::size_t Count() const noexcept {return cars_.size();}
+    std::int32_t OriginalModel(std::size_t model) const;
 
     // Original acceleration storage is independent of the resource pointer:
     // unloading cars does not erase its 64 constructed sample tables.
@@ -258,7 +271,7 @@ private:
 
     std::vector<CarDefinition> cars_;
     std::array<CarLanguageInfo,50> languageInfo_{};
-    std::array<Appearance, CarCount> appearance_{};
+    std::array<Appearance, NativeCarCapacity> appearance_{};
     std::vector<CarSkin> skins_;
     bool carsLoaded_ = false;
     bool skinsLoaded_ = false;

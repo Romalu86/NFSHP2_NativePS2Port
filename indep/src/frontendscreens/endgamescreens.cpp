@@ -951,7 +951,8 @@ public:
         if(SeeRestartRace())items_.push_back({phrases_[1],0,1});
         if(SeeRestartEvent())items_.push_back({phrases_[4],0,2});
         Require(pEndGameScreens->Services().replay,"End-game menu has no actual replay owner");
-        if(!pEndGameScreens->Services().replay->desynchronized)items_.push_back({phrases_[13],0,3});
+        const auto* replayOwner=pEndGameScreens->Services().replay->owner;
+        if(replayOwner && replayOwner->HasRaceRecording())items_.push_back({phrases_[13],0,3});
         if(!ResultsParameters().specialPursuit)items_.push_back({phrases_[14],0,4});
         items_.push_back({phrases_[7],0,5});
         auto& resources=*ResultsUi().resources;

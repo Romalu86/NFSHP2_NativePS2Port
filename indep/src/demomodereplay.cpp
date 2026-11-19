@@ -100,7 +100,7 @@ void DemoModeReplay::Launch()
         repeat_ && repeat_->bytes && repeat_->channelCount>0 &&
         streamIndex_.FrameCount()>0 &&
         (ReadU32(metadata_)==8u || ReadU32(metadata_)==9u || ReadU32(metadata_)==10u ||
-            ReadU32(metadata_)==11u) && ReadU32(metadata_+8)==1u)active=1;
+            ReadU32(metadata_)==11u || ReadU32(metadata_)==12u || (ReadU32(metadata_)==13u || ReadU32(metadata_)==14u)) && ReadU32(metadata_+8)==1u)active=1;
     else UnloadResourceFile();
 }
 
@@ -271,8 +271,13 @@ bool DemoModeReplay::Loader(std::uint32_t id,std::uint8_t* payload,std::size_t b
     if (id==0x39100u) {
         Require(!metadata_,"Demo recording has more than one metadata chunk");
         Require(payload && bytes>=0x50u && (ReadU32(payload)==8u || ReadU32(payload)==9u ||
-            ReadU32(payload)==10u || ReadU32(payload)==11u) &&
+            ReadU32(payload)==10u || ReadU32(payload)==11u || ReadU32(payload)==12u || (ReadU32(payload)==13u || ReadU32(payload)==14u)) &&
             ReadU32(payload+8)==1u,"Demo replay metadata is truncated or has an unsupported format");
+        // Native v12 uses the previously reserved metadata word at +0C.
+        // Flags: stronger opponents, cumulative timer, time-based steering.
+        Require(ReadU32(payload)<12u || ((ReadU32(payload+12)&~7u)==0u &&
+            (!(ReadU32(payload+12)&4u) || (ReadU32(payload+12)&2u))),
+            "Demo replay has unsupported native rule flags");
         metadata_=payload;metadataBytes_=bytes;return true;
     }
     if (id==0x39101u) {
@@ -294,11 +299,17 @@ bool DemoModeReplay::Loader(std::uint32_t id,std::uint8_t* payload,std::size_t b
         Require(metadata_,"Demo snapshot precedes its format metadata");
         snapshot.wireFormat=ReadU32(metadata_)==8u?static_cast<std::uint32_t>(REPLAY_SNAPSHOT_PAL_V8):ReadU32(payload+0x38u);
         Require((ReadU32(metadata_)==8u && snapshot.wireFormat==REPLAY_SNAPSHOT_PAL_V8) ||
-                ((ReadU32(metadata_)==9u || ReadU32(metadata_)==10u || ReadU32(metadata_)==11u) &&
+                ((ReadU32(metadata_)>=9u && ReadU32(metadata_)<=14u) &&
                     snapshot.wireFormat==REPLAY_SNAPSHOT_NATIVE),
             "Native Demo snapshot has an unsupported reference encoding");
-        snapshot.clockPolicy=ReadU32(metadata_)>=10u ? GAME_TIME_TIMER_NATIVE:GAME_TIME_TIMER_LEGACY;
-        snapshot.steeringPolicy=ReadU32(metadata_)==11u ? REPLAY_STEERING_TIME_BASED:REPLAY_STEERING_LEGACY;
+        const auto version=ReadU32(metadata_);
+        const auto flags=version>=12u?ReadU32(metadata_+12):0u;
+        snapshot.nativeStateVersion=version;
+        snapshot.clockPolicy=(version>=12u ? (flags&2u)!=0u:version>=10u) ?
+            GAME_TIME_TIMER_NATIVE:GAME_TIME_TIMER_LEGACY;
+        snapshot.steeringPolicy=(version>=12u ? (flags&4u)!=0u:version==11u) ?
+            REPLAY_STEERING_TIME_BASED:REPLAY_STEERING_LEGACY;
+        snapshot.nativeStrongerOpponents=(flags&1u)?1:0;
         std::copy(sourcePlayerTokens_.begin(),sourcePlayerTokens_.end(),snapshot.sourcePlayerTokens);
         const auto interesting=ReadU32(payload+0x14c);
         std::memcpy(&snapshot.totalInterestingValue,&interesting,4);
@@ -323,7 +334,7 @@ bool DemoModeReplay::Loader(std::uint32_t id,std::uint8_t* payload,std::size_t b
         auto repeat=std::make_unique<BitStream>();
         Require(bitStreamRestore(repeat.get(),payload,static_cast<std::uint32_t>(bytes))==BIT_STREAM_OK,
             "Demo replay contains an invalid actual BitStream header");
-        streamIndex_.Build(*repeat);
+        streamIndex_.Build(*repeat,ReadU32(metadata_));
         repeat_=std::move(repeat);return true;
     }
     return false;
@@ -390,7 +401,7 @@ void DemoModeReplay::LoadResourceFile(GameResources& resources,const GameTime& c
         for (const auto& chunk:file->chunks)
             Loader(chunk.id,file->bytes.data()+chunk.payloadOffset,chunk.size,clock);
         Require(metadata_ && metadataBytes_>=0x50u && (ReadU32(metadata_)==8u || ReadU32(metadata_)==9u ||
-            ReadU32(metadata_)==10u || ReadU32(metadata_)==11u) && ReadU32(metadata_+8)==1 &&
+            ReadU32(metadata_)==10u || ReadU32(metadata_)==11u || ReadU32(metadata_)==12u || (ReadU32(metadata_)==13u || ReadU32(metadata_)==14u)) && ReadU32(metadata_+8)==1 &&
             repeat_ && streamIndex_.FrameCount()>0,
             "Demo recording lacks complete supported metadata or its framed input stream");
         std::size_t managerNodes=0,demoNodes=0;
@@ -649,10 +660,15 @@ void DemoModeReplay::SaveRecordingToFile(const std::filesystem::path& path,
     bool nativeFormat=false,palFormat=false;
     int32_t clockPolicy=-1;
     int32_t steeringPolicy=-1;
+    int32_t strongerOpponents=-1;
+    int32_t stateVersion=-1;
     const auto inspectFormat=[&](const ReplaySnapshotStorage& entry) {
         if(entry.snapshot.wireFormat==REPLAY_SNAPSHOT_PAL_V8)palFormat=true;
         else if(entry.snapshot.wireFormat==REPLAY_SNAPSHOT_NATIVE)nativeFormat=true;
         else throw std::runtime_error("Demo Save has an unsupported snapshot format");
+        const auto nativeVersion=entry.snapshot.nativeStateVersion>=14 ? 14:entry.snapshot.nativeStateVersion>=13 ? 13:0;
+        if(stateVersion<0)stateVersion=nativeVersion;
+        Require(stateVersion==nativeVersion,"Demo Save cannot mix native persistent-state versions");
         Require(entry.snapshot.clockPolicy==GAME_TIME_TIMER_LEGACY ||
             entry.snapshot.clockPolicy==GAME_TIME_TIMER_NATIVE,"Demo Save has an unsupported clock policy");
         if(clockPolicy<0)clockPolicy=entry.snapshot.clockPolicy;
@@ -661,6 +677,12 @@ void DemoModeReplay::SaveRecordingToFile(const std::filesystem::path& path,
             entry.snapshot.clockPolicy==GAME_TIME_TIMER_LEGACY,"PAL Demo cannot use native Timer rounding");
         Require(entry.snapshot.steeringPolicy==REPLAY_STEERING_LEGACY ||
             entry.snapshot.steeringPolicy==REPLAY_STEERING_TIME_BASED,"Demo Save has an unsupported steering policy");
+        Require(entry.snapshot.nativeStrongerOpponents==0 || entry.snapshot.nativeStrongerOpponents==1,
+            "Demo Save has an unsupported native opponent rule");
+        if(strongerOpponents<0)strongerOpponents=entry.snapshot.nativeStrongerOpponents;
+        Require(strongerOpponents==entry.snapshot.nativeStrongerOpponents &&
+            (!strongerOpponents || entry.snapshot.wireFormat==REPLAY_SNAPSHOT_NATIVE),
+            "Demo Save cannot mix native opponent rules or apply them to PAL data");
         if(steeringPolicy<0)steeringPolicy=entry.snapshot.steeringPolicy;
         Require(steeringPolicy==entry.snapshot.steeringPolicy,"Demo Save cannot mix snapshot steering policies");
         Require(entry.snapshot.steeringPolicy==REPLAY_STEERING_LEGACY ||
@@ -677,7 +699,7 @@ void DemoModeReplay::SaveRecordingToFile(const std::filesystem::path& path,
         metadata_ && ReadU32(metadata_)==8u;
     Require(palInput==palFormat,"Demo Save cannot relabel source checksums as native recording data");
     ReplayStreamIndex outputIndex;
-    outputIndex.Build(*stream);
+    outputIndex.Build(*stream,stateVersion>0?static_cast<std::uint32_t>(stateVersion):13u);
     Require(outputIndex.FrameCount()>0,"Demo Save cannot publish an empty frame stream");
     // Native authoring captures its first manager node before later input
     // frames exist. Serialize the current manager interval into an output-only
@@ -686,7 +708,12 @@ void DemoModeReplay::SaveRecordingToFile(const std::filesystem::path& path,
     ReplaySnapshotStorage finalizedManager;
     if(nativeFormat && replayBorrower_) {
         const auto* original=replayBorrower_->FindSnapshot("REPLAY_MANAGER_STATE");
-        finalizedManager.allocation.resize(0x9400);
+        const auto& recordedState=replayBorrower_->State();
+        const auto managerBytes=recordedState.nativeStateVersion>=14 ?
+            std::size_t{1024}+std::size_t(recordedState.snapshotsTaken)*4+
+                std::size_t(recordedState.specialEventCount)*16:std::size_t{0x9400};
+        Require(managerBytes<=INT32_MAX,"Native Demo manager exceeds its file extent");
+        finalizedManager.allocation.resize(std::max(std::size_t{0x9400},managerBytes));
         auto& fresh=finalizedManager.snapshot;
         fresh=*original;fresh.bytes=finalizedManager.allocation.data();
         fresh.capacity=finalizedManager.allocation.size();fresh.cursor=0;fresh.dataSize=0;
@@ -708,14 +735,16 @@ void DemoModeReplay::SaveRecordingToFile(const std::filesystem::path& path,
     // A fresh record belongs to the live race and current native authoring
     // host. It must not inherit a previous disc recording's race/name.
     std::array<std::uint8_t,0x50> metadata{};
-    // Version11 identifies the corrected steering law without changing the
-    // snapshot/input payload. Versions8/9/10 retain their original laws;
-    // older runtimes reject11 rather than silently changing vehicle motion.
-    const auto version=steeringPolicy==REPLAY_STEERING_TIME_BASED ? 11u:
+    // Old files keep their layout. New PC snapshots include the persistent
+    // traction timer and v14 step RNG input; old files retain their wire layout.
+    const auto version=stateVersion>=13 ? static_cast<std::uint32_t>(stateVersion):strongerOpponents ? 12u:steeringPolicy==REPLAY_STEERING_TIME_BASED ? 11u:
         nativeFormat ? (clockPolicy==GAME_TIME_TIMER_NATIVE ? 10u:9u):8u;
     SaveDemoWord(metadata.data(),version);
     SaveDemoWord(metadata.data()+4,static_cast<std::uint32_t>(parameters.selectedScenario));
     SaveDemoWord(metadata.data()+8,1u);
+    if(version>=12u)SaveDemoWord(metadata.data()+12,(strongerOpponents?1u:0u) |
+        (clockPolicy==GAME_TIME_TIMER_NATIVE?2u:0u) |
+        (steeringPolicy==REPLAY_STEERING_TIME_BASED?4u:0u));
     (void)bGetComputerName(reinterpret_cast<char*>(metadata.data()+16),63);
     metadata.back()=0;
     std::vector<std::uint8_t> result(8u,0);

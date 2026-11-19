@@ -1,5 +1,7 @@
 #include "indep/inc/Table.hpp"
 #include "indep/inc/MellowMover.hpp"
+#include "indep/inc/AICarController.hpp"
+#include "indep/inc/Flags.hpp"
 #include "bware/inc/bMath.hpp"
 #include "bware/inc/bWare.hpp"
 #include "bware/inc/bMath.hpp"
@@ -210,7 +212,14 @@ void mellowMoverCollectForces(MellowMover* mover)
 
 void mellowMoverSetBoost(MellowMover* mover, float boost)
 {
-    mover->aerodynamics->speedScale = mover->state->performanceScale;
+    float aerodynamicScale=mover->state->performanceScale;
+    const auto* movement=mover->owner?static_cast<const CarMovement*>(mover->owner->movement):nullptr;
+    const auto* driver=movement && movement->frame?movement->frame->environment.driver:nullptr;
+    if(driver && driver->kind==CAR_DRIVER_AI && driver->owner.ai) {
+        boost=driverAINativeRacePerformanceScale(&driver->owner.ai->base,boost);
+        aerodynamicScale=driverAINativeRacePerformanceScale(&driver->owner.ai->base,aerodynamicScale);
+    }
+    mover->aerodynamics->speedScale = aerodynamicScale;
     mover->aerodynamics->dragScale = bScalarAdd(1.0f, -mover->owner->interactionFactor);
     rigidBodySetSpeedLimitScale(mover->body, boost);
     float friction = boost;
@@ -319,7 +328,7 @@ float mellowMoverMove(MellowMover* mover, float elapsed)
     for (int32_t index = 0; index < steps; ++index) {
         mover->environment->stepContext->lastSubstepElapsed = step;
         componentSystemIntegrateEuler(&mover->components, step, mover->derivatives, 33);
-        // PAL 219E50–219E64 builds the angular cache during Euler integration,
+        // PAL 219E50РІР‚вЂњ219E64 builds the angular cache during Euler integration,
         // then normalizes the orientation used by the next substep.
         motionMatrixOrthonormalize(mover->body->motion.orientation, mover->body->motion.orientation);
     }

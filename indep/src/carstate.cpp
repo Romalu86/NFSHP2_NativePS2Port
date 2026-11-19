@@ -96,6 +96,7 @@ void vehicleStateReset(VehicleState* state)
     state->tractionAssistPhase = 0;
     state->tractionAssistTime = 0.0f;
     state->tractionAssistScale = 1.0f;
+    state->tractionAssistDwell = 0.0f;
     memset(state->velocityFrame, 0, sizeof(state->velocityFrame));
     state->velocityFrameValid = 0;
 }
@@ -392,6 +393,12 @@ void vehicleStateSnapshot(VehicleState* state,ReplaySnapshot* snapshot)
     replaySnapshotMoveInteger(snapshot,&state->tractionAssistPhase,4);
     replaySnapshotMoveFloat(snapshot,&state->tractionAssistTime);
     replaySnapshotMoveFloat(snapshot,&state->tractionAssistScale);
+    // Native PC timer introduced by the time-based traction adaptation.
+    // Older recordings have no value to restore and must not inherit it
+    // from the later live race. PAL/source field order stays unchanged.
+    if(snapshot->wireFormat==REPLAY_SNAPSHOT_NATIVE && snapshot->nativeStateVersion>=13)
+        replaySnapshotMoveFloat(snapshot,&state->tractionAssistDwell);
+    else if(snapshot->restoring)state->tractionAssistDwell=0.0f;
     if(snapshot->restoring && snapshot->result==REPLAY_SNAPSHOT_OK) {
         // XYZ is serialized; rebuild native point/direction slots before
         // checking the new state. Live-state finite validation stays strict.

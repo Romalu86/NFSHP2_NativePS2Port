@@ -195,9 +195,9 @@ WorldAudioMessagesResult worldAudioTournamentRaceSpeech(WorldAudioMessages* mess
 }
 WorldAudioMessagesResult worldAudioUnlockCarSpeech(WorldAudioMessages* messages,const CarInfoResource& cars,int32_t model)
 {
-    if(model<0 || model>=64 || !cars.CarsLoaded())return WORLD_AUDIO_MESSAGES_INVALID_REQUEST;
+    if(model<0 || static_cast<std::size_t>(model)>=cars.Count() || !cars.CarsLoaded())return WORLD_AUDIO_MESSAGES_INVALID_REQUEST;
     const auto& car=cars.Car(static_cast<std::size_t>(model));
-    uint32_t value=static_cast<uint32_t>(worldSpeechConvertCarTypeToUnlockSpeech(model));
+    uint32_t value=static_cast<uint32_t>(worldSpeechConvertCarTypeToUnlockSpeech(cars.OriginalModel(model)));
     if(!value)return WORLD_AUDIO_MESSAGES_OK; // Final conversion deliberately has silent models.
     uint32_t category;
     if(car.bodyCategory==1)category=0x96;

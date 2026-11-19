@@ -1817,6 +1817,13 @@ void carFramePlayerUpdateNonGameState(CarFramePlayerState* player)
     auto& registry=*player->registry;
     auto& session=*registry.services->session;
     const auto type=joystickGetType(own.bindings.input,player->movement.controllerPort);
+    // A native keyboard/pad handoff keeps this same connected Player port.
+    // It is not the PS2 unplug/reconnect which must open Pause below.
+    const auto port=player->movement.controllerPort;
+    const bool nativeHandoff=port>=0 && port<2 && own.bindings.input->nativeHostInput[port] &&
+        ((type==JOYSTICK_PROFILE_KEYBOARD && player->joystickType==JOYSTICK_PROFILE_GAMEPAD) ||
+         (type==JOYSTICK_PROFILE_GAMEPAD && player->joystickType==JOYSTICK_PROFILE_KEYBOARD));
+    if(nativeHandoff)player->joystickType=type;
     if (session.state==3) {
         if (!joystickIsPluggedIn(own.bindings.input,player->movement.controllerPort) || type!=player->joystickType)
             raceCoordinatorRequestPause(&session,player->movement.controllerPort);

@@ -253,7 +253,9 @@ struct ApplicationRuntime::Storage {
     frontend::DemoModeReplay demoReplay;
     frontend::ApplicationFrontendFlow flow;
     frontend::FrontendRaceSetupBindings setup{};
-    std::unique_ptr<TexturePack> dynamicTextures,hudTextures,carTextures;
+    std::unique_ptr<TexturePack> dynamicTextures,hudTextures,carTextures,additionalCarTextures;
+    std::unique_ptr<LightMaterialResources> additionalCarMaterials;
+    std::unique_ptr<TrackRouteEditorResources> additionalPaintGeometry;
     CarTextureNamingPolicy carNaming;PositionMarkerRegistry positionMarkers{};
     GameInputRouter input{};std::array<GameInputRegistration,256> registrations{};
     JoystickSystem samples{};RealDriverTuning driverTuning{};
@@ -362,7 +364,7 @@ struct ApplicationRuntime::Storage {
             "position=(%.3f,%.3f,%.3f) speed=%.3f restoring=%d recording=%d exhausted=%d desynchronized=%d "
             "source_sync_policy=%d source_samples=%u source_mismatches=%u first_source_mismatch_loop=%d "
             "application_fps=%.2f frame_ms=%.3f cpu_ms=%.3f gpu_ms=%.3f gpu_available=%d "
-            "catch_up=%d disable_catch_up_pref=%d opponent_difficulty=%d",
+            "catch_up=%d disable_catch_up_pref=%d opponent_difficulty=%d stronger_opponents=%d",
             clock.worldLoopCounter,clock.worldTimer,parameters.selectedScenario,world.totalCars,state[5],movement?movement->mode:-1,
             static_cast<double>(car?car->position[0]:0.0f),static_cast<double>(car?car->position[1]:0.0f),
             static_cast<double>(car?car->position[2]:0.0f),static_cast<double>(vehicle?vehicle->speed:0.0f),
@@ -374,7 +376,8 @@ struct ApplicationRuntime::Storage {
             applicationFrameTiming.framesPerSecond,applicationFrameTiming.frameMilliseconds,
             applicationFrameTiming.cpuMilliseconds,applicationFrameTiming.gpuMilliseconds,
             applicationFrameTiming.gpuTimeAvailable?1:0,parameters.relativePaceEnabled,
-            applicationNativeGameplay.disableCatchUp?1:0,parameters.opponentDifficulty);
+            applicationNativeGameplay.disableCatchUp?1:0,parameters.opponentDifficulty,
+            applicationNativeGameplay.strongerOpponents?1:0);
         if(demoReplay.active)demoReplay.RecordSessionEvent("demo.status",nullptr,detail);
         else host.RecordSessionEvent("gameplay.status",detail);
         if(!demoReplay.active) {
@@ -570,8 +573,19 @@ struct ApplicationRuntime::Storage {
             host.RecordSessionEvent("demo.driver",detail);
         }
     }
-    void AudioResult(WorldAudioResult result,const char* operation) const
+    void AudioResult(WorldAudioResult result,const char* operation)
     {
+        if(result==WORLD_AUDIO_NO_OUTPUT_DEVICE && audioOpened) {
+            // PumpWindowsDevice has joined the failed device while all its
+            // buffers still live. MoviePlayer and game sound borrow this
+            // session flag and stop producing audio without stopping time.
+            carSoundGlobals.policy.audioSystemEnabled=0;
+            audioOpened=false;
+            audioQueue.result=WORLD_AUDIO_OK;
+            host.RecordSessionEvent("audio.output.unavailable",
+                "Playback endpoint was disconnected; continuing without sound for this session");
+            return;
+        }
         if(result!=WORLD_AUDIO_OK) {
             char detail[256]{};std::snprintf(detail,sizeof(detail),"operation=%s result=%d",operation,static_cast<int>(result));
             host.RecordSessionEvent("audio.failure",detail);
@@ -708,7 +722,13 @@ struct ApplicationRuntime::Storage {
         if(!flow.inGameFlag || !session || !resources)return false;
         // The pause menu and its backdrop still advance on each logical tick.
         // Between ticks their captured draw commands can be presented again.
-        if(session->state!=RC_STATE_RACE_IN_PROGRESS && session->state!=RC_STATE_PAUSE)return false;
+        switch(session->state) {
+        case RC_STATE_RACE_IN_PROGRESS:case RC_STATE_PAUSE:
+        case RC_STATE_CAMERA_FLYBY:case RC_STATE_PRE_RACE:
+        case RC_STATE_INSTANT_REPLAY:case RC_STATE_AUTO_REPLAY:
+        case RC_STATE_POST_RACE:case RC_STATE_AI_DEMO:case RC_STATE_REPLAY_DEMO:break;
+        default:return false;
+        }
         const auto& loader=resources->Loader();
         if(!loader.IsResourceLoadingComplete() || loader.HasPendingFileReads())return false;
         for(const auto* pack:texturePackRegistry.packs)if(pack->HasPendingReads())return false;
@@ -876,6 +896,18 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     Require(s.dynamicTextures->LoadTextureTableFromFile("GLOBAL/DYNTEX.BIN"),"Missing final resource GLOBAL/DYNTEX.BIN");
     s.hudTextures=std::make_unique<TexturePack>(texturePackRegistry,s.files,registry.Models(),"HudTextures","GLOBAL/HUDTEX.BIN");
     Require(s.hudTextures->LoadTextureTableFromFile("GLOBAL/HUDTEX.BIN"),"Missing final resource GLOBAL/HUDTEX.BIN");
+    const auto extraCarsDirectory=nativeExecutablePath().parent_path()/"Extras"/"Restored";
+    if(std::filesystem::is_regular_file(extraCarsDirectory/"CATALOG.BIN")) {
+        s.files.MountAdditionalCars(extraCarsDirectory);
+        global.cars->LoadAdditionalCars(s.files.Load("EXTR/CATALOG.BIN"));
+        if(applicationNativeGameplay.restoredCarContent) {
+            s.additionalCarMaterials=std::make_unique<LightMaterialResources>(s.files.Load("EXTR/MATERIALS.BIN"),registry.Models());
+            s.additionalCarTextures=std::make_unique<TexturePack>(texturePackRegistry,registry.Models(),
+                s.files.Load("EXTR/TEXTURES.BIN"),0);
+            s.additionalPaintGeometry=std::make_unique<TrackRouteEditorResources>(
+                s.files.Load("EXTR/GEOMETRY/LAMBOCOP_W.BUN"),&registry.Models());
+        }
+    }
     s.carTextures=std::make_unique<TexturePack>(texturePackRegistry,s.files,registry.Models(),"CarTextures","CARS/TEXTURES.BIN");
     Require(s.carTextures->LoadTextureTableFromFile("CARS/TEXTURES.BIN"),"Missing final resource CARS/TEXTURES.BIN");
     worldAudioInitialize(&s.audioQueue,nullptr,0,s.audioRequests.data(),s.audioRequests.size());
@@ -887,9 +919,11 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.soundBindings.physicalProgressOwner=&s;
     s.soundBindings.servicePhysicalAudio=[](void* context)->WorldAudioResult {
         auto& owner=*static_cast<Storage*>(context);
-        if(!owner.audioOpened)return WORLD_AUDIO_INVALID_BINDING;
+        if(!owner.audioOpened)return carSoundGlobals.policy.audioSystemEnabled ? WORLD_AUDIO_INVALID_BINDING:WORLD_AUDIO_OK;
         if(!owner.host.PollEvents())return WORLD_AUDIO_BACKEND_FAILURE;
-        return owner.host.PumpAudio(owner.sound);
+        const auto result=owner.host.PumpAudio(owner.sound);
+        owner.AudioResult(result,"Physical sound source progress");
+        return WORLD_AUDIO_OK;
     };
     s.AudioResult(s.sound.BindSoundClient(&s.soundBindings),"Sound source callback binding");
     s.uiSound.audio=&s.audioQueue;s.uiSound.enabled=&carSoundGlobals.policy.audioSystemEnabled;
@@ -902,7 +936,23 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.AudioResult(speech->noise->Bind(&s.audioQueue,&worldAudioRuntime),"Speech noise binding");s.speechNoiseBound=true;
     if(carSoundGlobals.policy.audioSystemEnabled) {
         s.AudioResult(s.sound.Initialize(),"Sound driver initialization");
-        s.AudioResult(s.host.OpenAudio(s.sound),"Physical Windows audio device");s.audioOpened=true;
+        const auto opened=s.host.OpenAudio(s.sound);
+        if(opened==WORLD_AUDIO_NO_OUTPUT_DEVICE) {
+            // The host has joined/released the failed device and rejected
+            // its INITIALIZE request. Retire that owner before rebinding
+            // the same queue for the game's existing no-sound path.
+            s.host.RecordSessionEvent("audio.output.unavailable",
+                "No active playback endpoint; continuing without sound for this session");
+            s.AudioResult(s.sound.Shutdown(),"Unavailable sound device retirement");
+            worldAudioInitialize(&s.audioQueue,nullptr,0,s.audioRequests.data(),s.audioRequests.size());
+            carSoundGlobals.policy.audioSystemEnabled=0;
+            s.AudioResult(s.sound.Bind(s.audioQueue,s.files,carSoundGlobals.policy.audioSystemEnabled),"Disabled sound binding");
+            s.AudioResult(s.sound.BindSoundClient(&s.soundBindings),"Disabled sound callback binding");
+        } else {
+            s.AudioResult(opened,"Physical Windows audio device");s.audioOpened=true;
+        }
+    }
+    if(s.audioOpened) {
         s.AudioResult(s.sound.SetPath("sound\\"),"Source audio bank path");
         s.AudioResult(soundLoadRegion(s.soundBindings,"common"),"Source common sound bank");
         while(!soundDriverState.commonRegionLoaded) {
@@ -921,8 +971,8 @@ void ApplicationRuntime::Initialize(const std::filesystem::path& configFile)
     s.language.Bind({s.profilesOwner,s.flow,*s.dynamicTextures,loader,registry.Flailer(),s.speechStream,
         &s,[](void* context) {
             auto& owner=*static_cast<Storage*>(context);
-            Require(owner.audioOpened,"Localized speech retirement requires its physical audio device");
-            owner.AudioResult(owner.host.PumpAudio(owner.sound),"Physical localized speech retirement");
+            if(owner.audioOpened)
+                owner.AudioResult(owner.host.PumpAudio(owner.sound),"Physical localized speech retirement");
             // Pump consumes the retained STOP itself. Do not run another
             // source Update/region completion while inside a flow teardown.
             std::this_thread::yield();
@@ -1498,7 +1548,9 @@ std::exception_ptr ApplicationRuntime::ShutdownNoThrow() noexcept
     s.movie.reset();s.environmentMap.reset();
     for(auto* pack:{s.carTextures.get(),s.hudTextures.get(),s.dynamicTextures.get()})
         if(pack)s.RecordCleanupFailure("Texture pack",pack->Shutdown());
-    s.carTextures.reset();s.hudTextures.reset();s.dynamicTextures.reset();
+    s.additionalPaintGeometry.reset();
+    s.carTextures.reset();s.additionalCarTextures.reset();s.hudTextures.reset();s.dynamicTextures.reset();
+    s.additionalCarMaterials.reset();
     s.highScores.reset();s.tracks.reset();s.resources.reset();
     if(s.inputBound) {
         s.Retire("Input type monitoring",[&]{joystickCloseTypeMonitoring(&s.input);});

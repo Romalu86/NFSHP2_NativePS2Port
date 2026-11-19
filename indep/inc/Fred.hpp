@@ -115,7 +115,9 @@ struct FrontendMusicSettings {
         std::int8_t status{};
         std::int8_t genreBit{};
     };
-    std::array<Row,32> rows{};
+    // PC v3 profiles retain the full optional soundtrack. v1/v2 readers
+    // still consume their original32 rows at the file boundary.
+    std::array<Row,64> rows{};
     std::int32_t count{};
     std::uint8_t enabledGenres{};
     // Actual saved audio options; live mixer categories remain bSound owned.
@@ -132,13 +134,14 @@ struct FrontendMusicSettings {
 struct FrontendPlayerInfo {
     const CarInfoResource* cars{};
     const LanguageManager* language{};
-    std::array<FrontendCarAvailability,64> availability{};
+    std::array<FrontendCarAvailability,CarInfoResource::NativeCarCapacity> availability{};
     std::array<FrontendRideInfo,11> selectedRides{};
     PlayerSettings settings{};
     // Final FrontendPlayerInfo+6CC, accumulated profile points.
     std::int32_t totalPoints{};
 
     void SetCarAvailability(std::int32_t status,std::int32_t model,std::int32_t skin,bool allowDashboard);
+    void RefreshAdditionalCars(bool policeOnly=false,bool eventWhitelist=false);
     void FlushAvailableCars();
     std::int32_t GetCarStatus(std::int32_t model) const;
     std::int32_t GetSelectedCarClass(std::int32_t gameType) const;
@@ -250,6 +253,7 @@ struct FrontendPlayerManager {
     bool DeserializeNativeProfileText(const void* data,std::size_t bytes,std::string& error);
     bool ConvertLegacyProfileToText(const void* data,std::size_t bytes,std::string& text,std::string& error) const;
     void CaptureAudioOptions(const ::CarSoundBindings& sound,bool rebuildMusicList);
+    void AppendMissingMusicTracks(const ::CarSoundBindings& sound);
     void ApplyAudioOptions(const ::CarSoundBindings& sound,const RaceParameters& parameters,
         FlailerSoundState& uiSound) const;
     std::int32_t InsertPlayerName(const char* name);

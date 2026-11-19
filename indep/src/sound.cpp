@@ -1063,6 +1063,10 @@ WorldAudioResult worldAudioSubmitChannelVolume(WorldAudioRequestQueue* queue,
 WorldAudioResult worldAudioSetMode(WorldAudioRequestQueue* queue, int32_t mode)
 {
     if (!queue) return WORLD_AUDIO_INVALID_BINDING;
+    if(queue->spatialEnabled && !*queue->spatialEnabled) {
+        worldAudioRuntime.audioMode=mode;
+        return queue->result=WORLD_AUDIO_OK;
+    }
     if (reserveRequests(queue, 1) != WORLD_AUDIO_OK) return queue->result;
     WorldAudioRequest* request = appendRequest(queue, NULL, NULL, NULL, WORLD_AUDIO_SET_AUDIO_MODE);
     request->audioMode = mode;

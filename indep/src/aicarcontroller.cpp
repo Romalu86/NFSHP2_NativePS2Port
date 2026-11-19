@@ -6,6 +6,9 @@
 #include "indep/inc/CarDriver.hpp"
 #include "indep/inc/Player.hpp"
 #include "indep/inc/Flags.hpp"
+#include "indep/inc/Replay.hpp"
+#include "indep/inc/RaceCoordinator.hpp"
+#include "indep/inc/RaceCoordinator.hpp"
 #include <stdlib.h>
 #include <string.h>
 #include "indep/inc/CarCollisionDetect.hpp"
@@ -234,6 +237,14 @@ void driverAISnapshot(DriverAIBase* driver,ReplaySnapshot* snapshot)
     replaySnapshotMoveInteger(snapshot,&driver->retainedSnapshotCounter,4);
     replaySnapshotMoveFloat(snapshot,&driver->retainedSnapshotScalar);
     replaySnapshotMoveFloat(snapshot,&driver->stopDelaySeconds);
+    // These live waiting-phase cells have no equivalent storage in the
+    // retained PC action object. A rewind must not inherit their future
+    // timeout or moving/stopped phase from the end of a long race.
+    if(snapshot->wireFormat==REPLAY_SNAPSHOT_NATIVE && snapshot->nativeStateVersion>=14) {
+        replaySnapshotMoveInteger(snapshot,&driver->waitIntervalTicks,4);
+        replaySnapshotMoveInteger(snapshot,&driver->waitStartTicks,4);
+        replaySnapshotMoveInteger(snapshot,&driver->waitMoving,4);
+    }
     int8_t playerNumber=driver->pacePlayer?static_cast<int8_t>(driver->pacePlayer->movement.seat):-1;
     replaySnapshotMoveData(snapshot,&playerNumber,1,1,1);
     if(snapshot->restoring) {
@@ -306,6 +317,40 @@ static bool nativeRacePaceDisabled(const DriverAIBase* driver,const RaceParamete
 {
     return settings && driver->kind==CAR_DRIVER_AI && !settings->demoReplay &&
         hp2::applicationNativeGameplay.disableCatchUp;
+}
+
+// A bounded, distance-independent PC difficulty supplement. Preserve the
+// original pacing value and PAL snapshot payload; evaluate the supplement at
+// its consumers so repeated frames can never compound the bonus.
+float driverAINativeRacePerformanceScale(const DriverAIBase* driver,float authoredScale)
+{
+    if(!driver ||
+        driver->kind!=CAR_DRIVER_AI || !driver->paceEnabled ||
+        !driver->action || !driver->action->affectsRacePace ||
+        !std::isfinite(authoredScale) || authoredScale<=0.0f)return authoredScale;
+    const auto* movement=driver->physics.movement;
+    if(!movement || movement->bindings.player || !movement->bindings.owner ||
+        !movement->bindings.owner->raceEntry)return authoredScale;
+    const auto* simulation=driver->environment?driver->environment->simulation:nullptr;
+    const auto* services=simulation && simulation->race?simulation->race->services:nullptr;
+    const auto* settings=services?services->settings:nullptr;
+    if(!settings || !services->session || settings->mode<=0)return authoredScale;
+    const auto state=services->session->state;
+    bool stronger=false;
+    if(state==RC_STATE_RACE_IN_PROGRESS)stronger=hp2::applicationNativeGameplay.strongerOpponents;
+    else if(state==RC_STATE_INSTANT_REPLAY || state==RC_STATE_AUTO_REPLAY ||
+        state==RC_STATE_POST_RACE || state==RC_STATE_REPLAY_DEMO) {
+        // Playback must simulate the same rule as the captured race, even if
+        // the launcher's current preference differs. PAL/older REC default off.
+        const auto* replay=simulation->replay?simulation->replay->manager:nullptr;
+        stronger=replay && replay->nativeStrongerOpponents!=0;
+    }
+    if(!stronger)return authoredScale;
+    // Add at most eight percentage points, tapering the supplement to zero
+    // at 1.15. Existing stronger authored/scripted gains are never increased.
+    const float ceiling=authoredScale>1.15f?authoredScale:1.15f;
+    const float adjusted=authoredScale+0.08f;
+    return adjusted<ceiling?adjusted:ceiling;
 }
 
 void driverAICompareRacePace(DriverAIBase* driver,const RaceCarEntry* own,
@@ -557,7 +602,7 @@ void driverAIApplyAction(DriverAIBase* driver)
                 if(!policy->launch){driver->result=CAR_DRIVER_INVALID_BINDING;return;}
                 if(simulation->race->services->settings->specialPursuit||
                     (policy->launch->skipFrontend&&policy->raceVariantMode))speed=speed*0.75f;
-                speed=speed*movement->bindings.state->performanceScale;
+                speed=speed*driverAINativeRacePerformanceScale(driver,movement->bindings.state->performanceScale);
             }
             tolerance=action->speedTolerance;
             enabled=action->enabled;

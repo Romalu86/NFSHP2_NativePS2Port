@@ -355,7 +355,7 @@ hp2::LoadableGaugeTextures hp2::ChooseLoadableTextures(const CarDefinition& car,
     char name[128];
     std::snprintf(name,sizeof(name),"3RDPERSON_%d",convertFloatToInt32(car.gauges.genericMaximum));
     result.generic=hashString(name);
-    std::string base=car.name;
+    std::string base=car.presentationName.empty() ? car.name:car.presentationName;
     if (base=="LAMBOCOP") base="MURCIELAGO";
     else {
         std::size_t suffix=0;

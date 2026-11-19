@@ -291,6 +291,9 @@ struct RaceCarEntry;
 void driverAICompareRacePace(DriverAIBase* driver,const struct RaceCarEntry* own,
     const struct RaceCarEntry* player,float* positionResponse,float* speedResponse);
 void driverAIUpdateRacePace(DriverAIBase* driver);
+// Optional PC challenge policy, not an additional recovered PAL function.
+// Shared by the AI target and physical drivetrain; never changes snapshot state.
+float driverAINativeRacePerformanceScale(const DriverAIBase* driver,float authoredScale);
 #ifdef __cplusplus
 }
 #endif

@@ -197,6 +197,7 @@ void MemcardScreens::Storage::ApplyLoadedSettings()
         Require(state.menus->raceSetup && state.menus->raceSetup->parameters &&
             state.menus->ui && state.menus->ui->sound,
             "Loaded audio options have no canonical race or speech-volume settings");
+        state.frontend.AppendMissingMusicTracks(*state.menus->sounds);
         state.frontend.ApplyAudioOptions(*state.menus->sounds,*state.menus->raceSetup->parameters,*state.menus->ui->sound);
     }
     // Final245D30 load commit restores both saved FRED+178/+17C choices

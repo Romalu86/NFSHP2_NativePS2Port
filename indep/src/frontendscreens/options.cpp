@@ -1430,7 +1430,7 @@ public:
     struct Genre {
         std::array<char,20> name{};
         std::int32_t count{};
-        std::array<std::uint8_t,20> rows{};
+        std::array<std::uint8_t,32> rows{};
     };
     std::array<Genre,6> genres{};
     std::int32_t count{};
@@ -1491,6 +1491,41 @@ void FrontendPlayerManager::CaptureAudioOptions(const CarSoundBindings& sound,bo
     // actual capture, initializes A0/A4/A8/AE/AF, then populates GenreMgr.
     musicSettings.menuState={{0,5,0}};musicSettings.menuMode=0;musicSettings.enabledGenres=255;
     GenreMgr genres;genres.Populate(sound,musicSettings);
+}
+
+void FrontendPlayerManager::AppendMissingMusicTracks(const CarSoundBindings& sound)
+{
+    if(!soundJukeboxPlayer.IsCartridgeLoaded())return;
+    Require(musicSettings.count>=0 && static_cast<std::size_t>(musicSettings.count)<=musicSettings.rows.size(),
+        "Saved playlist exceeds the native music rows");
+    const auto previousCount=musicSettings.count;
+    const auto favourite=musicSettings.menuState[1];
+    std::int32_t retained=0,newFavourite=0;
+    for(std::int32_t i=0;i<previousCount;++i) {
+        const auto row=musicSettings.rows[i];
+        const bool present=row.group>=0 && static_cast<std::size_t>(row.group)<soundJukeboxPlayer.groups.size() &&
+            row.track>=0 && static_cast<std::size_t>(row.track)<soundJukeboxPlayer.groups[row.group].tunes.size();
+        if(!present)continue;
+        if(i==favourite)newFavourite=retained;
+        musicSettings.rows[retained++]=row;
+    }
+    musicSettings.count=retained;
+    for(std::size_t i=retained;i<musicSettings.rows.size();++i)musicSettings.rows[i]={};
+    if(retained!=previousCount){musicSettings.menuState[0]=0;musicSettings.menuState[1]=newFavourite;musicSettings.menuMode=0;}
+    for(std::size_t group=0;group<soundJukeboxPlayer.groups.size();++group)
+        for(std::size_t track=0;track<soundJukeboxPlayer.groups[group].tunes.size();++track) {
+            bool present=false;
+            for(std::int32_t i=0;i<musicSettings.count;++i)
+                if(musicSettings.rows[i].group==group && musicSettings.rows[i].track==track){present=true;break;}
+            if(present)continue;
+            Require(musicSettings.count>=0 && static_cast<std::size_t>(musicSettings.count)<musicSettings.rows.size(),
+                "Saved playlist exceeds its native track storage");
+            auto& row=musicSettings.rows[musicSettings.count++];
+            row.group=static_cast<std::int8_t>(group);row.track=static_cast<std::int8_t>(track);
+            row.status=static_cast<std::int8_t>(soundJukeboxGetTrackStatus(sound,row.group,row.track));
+        }
+    GenreMgr genres;genres.Populate(sound,musicSettings);
+
 }
 
 void FrontendPlayerManager::ApplyAudioOptions(const CarSoundBindings& bindings,
@@ -1700,7 +1735,7 @@ public:
             0xa29f7a16u,0xc866642bu,0xa29f7a17u,0xc866686cu,0xa29f7a18u,0xc8666cadu,
             0xa29f7a19u,0xc86670eeu,0xa29f7a1au,0xc866752fu,0xa29f7a1bu,0xc8667970u,
             0xa29f7a1cu,0xc8667db1u,0x2932dfcau};
-        scrolling_.AddObjects(objects,std::size(objects));scrolling_.SetItemCount(11);
+        scrolling_.AddObjects(objects,std::size(objects));scrolling_.SetItemCount(master_?12:11);
     }
     ~AudioOptionsScreen() override {EndMasterPreview();}
     void HandleHighlight(ScreenMessage,ScreenCallbackData&,std::uint32_t) override {}
@@ -1755,13 +1790,11 @@ public:
                 return;
             }
             if(message==ScreenMessage::Highlight) {
-                ScreenCallbackData first{MenuFirst63,data.joystickPort,0,0};
-                scrolling_.HandleEvent(ScreenMessage::Highlight,first);
-                scrolling_.SetCurrentObject(MenuMaster);
+                scrolling_.HandleEvent(ScreenMessage::Highlight,data);
                 constexpr Translation help{"Set the overall game volume.","Regler le volume general du jeu.","Gesamtlautstaerke des Spiels einstellen.",
                     "Regola il volume generale del gioco.","Ajusta el volumen general del juego.","Stall in spelets huvudvolym."};
                 blurb_.NewText(help[MenuLanguage(services)]);
-                OptionsScreenBase::HandleHighlight(message,data,hashString("MI_0_MASK"));
+                OptionsScreenBase::HandleHighlight(message,data,scrolling_.GetCurrentMenuMask());
                 arrows_.SetCurrentItem(0);return;
             }
             if(message==ScreenMessage::Left || message==ScreenMessage::Right || message==ScreenMessage::Select) {
@@ -2079,7 +2112,7 @@ public:
         resources.SetObjectVisibility(screen,0x20d73d01u,listFocus_ && genre.count>=5 && topRow_!=genre.count-5);
         const auto footer=TrackText(FavouriteRow());
         resources.Printf(screen,0x0b41999au,"%s (%s)",footer.first.c_str(),footer.second.c_str());
-        resources.Printf(screen,0x52e039f3u,"%s",genre.name.data());
+        resources.SetFittedText(screen,0x52e039f3u,ui.language,genre.name.data());
         resources.SetTextColor(screen,0x52e039f3u,listFocus_?0x00808080u:PackedColor(ui.highlightedRgb));
         resources.SetObjectVisibility(screen,0xd1cda594u,!listFocus_);
         resources.SetObjectVisibility(screen,0x9345e4a7u,!listFocus_);
@@ -2148,7 +2181,13 @@ public:
                 if(soundJukeboxPlayer.state!=2 && !soundJukeboxPlayer.IsFading())PlayCurrentSelectedSong();
             }
             break;
-        case ScreenMessage::Select:case ScreenMessage::ItemEvent:case ScreenMessage::ScreenBack:data.sound=0;break;
+        case ScreenMessage::Select:
+            if(!listFocus_ && GenreEnabled(editing_.menuMode))listFocus_=true;
+            else if(listFocus_) {
+                auto& row=SelectedRow();row.status=static_cast<std::int8_t>((row.status+1)%6);
+            }
+            data.sound=5;ShowPlaylist();break;
+        case ScreenMessage::ItemEvent:case ScreenMessage::ScreenBack:data.sound=0;break;
         default:break;
         }
     }

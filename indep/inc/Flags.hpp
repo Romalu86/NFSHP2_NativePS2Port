@@ -172,7 +172,8 @@ enum class NativeTextureFilter {Authored,Bilinear,Trilinear,Anisotropic};
 enum class NativeAntialiasing {Off,Fxaa,Msaa2,Msaa4,Msaa8,SmaaHigh,SmaaUltra};
 struct NativeGameplayOptions {
     bool racerNitro{},trafficVehicles{},disableCatchUp{},cockpitView{};
-    bool restoreCutTraffic{},randomNfsEditionOpponents{};
+    bool restoreCutTraffic{},randomNfsEditionOpponents{},strongerOpponents{};
+    bool restoredCarContent{}; // Four added cars and the individually requested restored paints.
 };
 extern NativeGameplayOptions applicationNativeGameplay;
 struct NativePcSettings {

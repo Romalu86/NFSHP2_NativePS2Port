@@ -756,6 +756,18 @@ WorldReplayResult worldReplaySynchronize(WorldReplay* replay, World* world)
             }
         } else return replay->result=WORLD_REPLAY_INVALID_BINDING;
     }
+    // Native replay input includes the RNG seen by this simulation step.
+    // AI waits, pursuit choices and starting-line physics use the original
+    // shared generator. Cameras/audio consume it between steps at a different
+    // cadence during playback, so restoring only World::simulationRandomState
+    // cannot reproduce those branches. Preserve the recorded seed, keeping
+    // strict trajectory checks and the original random algorithm unchanged.
+    if(replay->manager->nativeStateVersion>=14) {
+        if(replay->manager->recording)
+            replayManagerWrite(replay->manager,vectorDefaultRandomState,32,3);
+        else if(replay->manager->restoring)
+            vectorDefaultRandomState=replayManagerRead(replay->manager,32,3);
+    }
     if ((replay->log->stream && replay->log->stream->result != BIT_STREAM_OK) ||
         (replay->manager->stream && replay->manager->stream->result != BIT_STREAM_OK))
         return replay->result = WORLD_REPLAY_STREAM_FAILURE;
@@ -975,7 +987,7 @@ const CarConstructionBindings& WorldCarBindings(const World& world)
 Car* WorldCreateCar(World& world,RaceDriverInfo& driver,const float* position,uint16_t heading,float routeDistance)
 {
     auto bindings=WorldCarBindings(world);
-    Require(driver.appearance.modelCode>=0 && driver.appearance.modelCode<64,"Car selection exceeds the canonical catalogue");
+    Require(driver.appearance.modelCode>=0 && static_cast<std::size_t>(driver.appearance.modelCode)<bindings.render->cars->Count(),"Car selection exceeds the canonical catalogue");
     bindings.definition=&bindings.render->cars->Car(static_cast<size_t>(driver.appearance.modelCode));
     auto* loaded=carLoader.FindLoadedCar(bindings.definition->geometryCompressedPath.c_str());
     Require(loaded && loaded->loaded && loaded->file && loaded->file->Resources().collisionObjects,

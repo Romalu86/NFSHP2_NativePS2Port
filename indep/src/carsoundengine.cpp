@@ -84,7 +84,8 @@ AiEngineSound::AiEngineSound(CarMovement* movement, const CarSoundBindings& bind
         throw std::invalid_argument("AI engine sound has no actual car/resource/audio owner");
     const int32_t physicalModel = movement->bindings.info->modelCode;
     const int32_t appearanceModel = movement->bindings.owner->driverInfo->appearance.modelCode;
-    if (physicalModel < 0 || physicalModel >= 64 || appearanceModel < 0 || appearanceModel >= 64)
+    if (physicalModel < 0 || static_cast<std::size_t>(physicalModel)>=bindings.cars->Count() ||
+        appearanceModel < 0 || static_cast<std::size_t>(appearanceModel)>=bindings.cars->Count())
         throw std::invalid_argument("AI engine sound has an invalid model selection");
     const auto& physical = bindings.cars->Car(static_cast<size_t>(physicalModel));
     if (movement->bindings.info->body != &physical.rigidBodyInfo ||
@@ -274,7 +275,7 @@ public:
            movement->bindings.owner->driverInfo->driverClass!=1)
             throw std::invalid_argument("Traffic player engine has no actual human car/audio owner");
         const auto model=movement->bindings.info->modelCode;
-        if(model<0 || model>=64 || movement->bindings.info->engine!=
+        if(model<0 || static_cast<std::size_t>(model)>=bindings.cars->Count() || movement->bindings.info->engine!=
             &bindings.cars->Car(static_cast<std::size_t>(model)).engineInfo)
             throw std::invalid_argument("Traffic player engine lost its canonical physical model");
         const auto* cue=worldAudioFindInGame(bindings.audio,"AIEngine0");
@@ -703,7 +704,7 @@ PlayerEngineSound::PlayerEngineSound(CarMovement* movement, const CarSoundBindin
     // The full Car constructor creates sound while Car.player is still null.
     // Player() is checked by its real Update consumer after RC attaches it.
     const int32_t model = movement->bindings.info->modelCode;
-    if (model < 0 || model >= 64 || movement->bindings.info->engine != &Definition().engineInfo)
+    if (model < 0 || static_cast<std::size_t>(model) >= bindings.cars->Count() || movement->bindings.info->engine != &Definition().engineInfo)
         throw std::invalid_argument("Player engine descriptor is not the canonical retained model");
     smoothedRpm_ = bindings.engineGlobals->overrideRpm == 100.0f ?
         movement->bindings.state->engineRpm : bindings.engineGlobals->overrideRpm;

@@ -7,6 +7,7 @@
 #include "indep/inc/Fred.hpp"
 
 #include <algorithm>
+#include <set>
 #include <cctype>
 #include <cmath>
 #include <math.h>
@@ -249,6 +250,7 @@ void LoadChildren(CarInfoResource& owner, const std::vector<std::uint8_t>& data,
 } // namespace
 
 CarInfoResource::CarInfoResource() : cars_(CarCount) {
+    cars_.reserve(NativeCarCapacity);
     // Final PAL30D578: the two distinct full/short IDs are retained with the model key.
     // This owner is mutable; ELF write flags are not treated as immutability.
     languageInfo_={{
@@ -365,7 +367,7 @@ void CarInfoResource::LoadCars(const std::vector<std::uint8_t>& package,
         const auto skinCount = SignedByte(record + 0xE5);
         Require(skinCount >= 0 && skinCount <= 8, "CarInfo skin choice count is invalid");
         appearance.skins.count = static_cast<std::uint8_t>(skinCount);
-        for (std::size_t choice = 0; choice < appearance.skins.numbers.size(); ++choice)
+        for (std::size_t choice = 0; choice < 8; ++choice)
             appearance.skins.numbers[choice] = SignedByte(record + 0x544 + choice);
         definitions.push_back(std::move(car));
     }
@@ -399,6 +401,7 @@ void CarInfoResource::InitCarInfo()
 
 const char* CarDefinition::GetShortName(const frontend::LanguageManager& language) const
 {
+    if(!nativeDisplayName.empty() && bodyCategory==2)return nativeDisplayName.c_str();
     // The shipped language table has no traffic names. Its legacy fallback
     // points at the first racer; the native player option must identify the
     // actual selected traffic model instead of displaying that other car.
@@ -409,6 +412,7 @@ const char* CarDefinition::GetShortName(const frontend::LanguageManager& languag
 
 const char* CarDefinition::GetFullName(const frontend::LanguageManager& language) const
 {
+    if(!nativeDisplayName.empty())return nativeDisplayName.c_str();
     if(bodyCategory==2)return name.c_str();
     Require(languageInfo,"Car full name has no canonical language descriptor");
     return language.GetString(languageInfo->fullNameLanguageId);
@@ -464,13 +468,13 @@ const std::vector<CarDefinition>& CarInfoResource::Cars() const noexcept {
 
 const CarDefinition& CarInfoResource::Car(std::size_t modelCode) const {
     Require(carsLoaded_, "CarInfo is not loaded");
-    Require(modelCode < CarCount, "CarInfo model code is outside 0..63");
+    Require(modelCode < cars_.size(), "CarInfo model code is outside the loaded catalogue");
     return cars_[modelCode];
 }
 
 RigidBodyInfo* CarInfoResource::MutableRigidBodyInfo(std::size_t modelCode) {
-    Require(carsLoaded_ && cars_.size() == CarCount, "Physical properties require the loaded canonical CarInfo owner");
-    Require(modelCode < CarCount, "Physical property model code is outside 0..63");
+    Require(carsLoaded_, "Physical properties require the loaded canonical CarInfo owner");
+    Require(modelCode < cars_.size(), "Physical property model code is outside the loaded catalogue");
     return &cars_[modelCode].rigidBodyInfo;
 }
 
@@ -482,7 +486,8 @@ const CarDefinition& CarInfoResource::Find(const std::string& name) const {
 }
 
 bool CarInfoResource::IsAvailable(std::size_t modelCode) const {
-    return !Car(modelCode).geometryPath.empty();
+    return !Car(modelCode).geometryPath.empty() &&
+        (modelCode<CarCount || applicationNativeGameplay.restoredCarContent);
 }
 
 const CarDriverVisualVehicleInfo& CarInfoResource::VisualInfo(std::size_t modelCode) const {
@@ -507,40 +512,45 @@ const CarSkin* CarInfoResource::FindSkin(std::int32_t modelCode, std::int32_t sk
 }
 
 std::int32_t CarInfoResource::AvailableSkinCount(std::size_t modelCode) const {
-    return Car(modelCode).bodyCategory == 1 ? 1 : appearance_[modelCode].skins.count;
+    (void)Car(modelCode);
+    return modelCode<CarCount && Car(modelCode).bodyCategory == 1 && !(applicationNativeGameplay.restoredCarContent && modelCode==32) ? 1 : appearance_[modelCode].skins.count;
 }
 
 std::int32_t CarInfoResource::AvailableSkinNumber(std::size_t modelCode, std::int32_t selection,
                                                 bool alternatePursuitSkin) const {
-    if (Car(modelCode).bodyCategory == 1) return alternatePursuitSkin ? 2 : 1;
+    (void)Car(modelCode);
+    if (modelCode<CarCount && Car(modelCode).bodyCategory == 1 && !(applicationNativeGameplay.restoredCarContent && modelCode==32)) return alternatePursuitSkin ? 2 : 1;
+    if(applicationNativeGameplay.restoredCarContent && modelCode==32 && selection==0)return alternatePursuitSkin?2:1;
     const auto& choices = appearance_[modelCode].skins;
     Require(selection >= 0 && choices.count != 0, "Invalid CarInfo skin selection");
     return choices.numbers[static_cast<std::size_t>(selection) % choices.count];
 }
 
 std::int32_t CarInfoResource::RandomSkin(std::size_t modelCode, bool alternatePursuitSkin) const {
-    if (Car(modelCode).bodyCategory == 1)
+    (void)Car(modelCode);
+    if (modelCode<CarCount && Car(modelCode).bodyCategory == 1 && !(applicationNativeGameplay.restoredCarContent && modelCode==32))
         return AvailableSkinNumber(modelCode, 0, alternatePursuitSkin);
     const auto& choices = appearance_[modelCode].skins;
     if (choices.count == 0) return 0;
-    return choices.numbers[vectorDefaultRandomBounded(choices.count)];
+    return AvailableSkinNumber(modelCode,vectorDefaultRandomBounded(choices.count),alternatePursuitSkin);
 }
 
 bool CarInfoResource::WeightedPickRide(CarAppearanceSelection& output, std::int32_t bodyCategory,
     std::int32_t routeVehicleClass, const RaceParameters& parameters,
     const frontend::LanguageManager& language,bool allowNfsEdition,bool allowCutTraffic) const {
-    Require(carsLoaded_ && cars_.size() == CarCount, "Weighted car selection requires its canonical CarInfo owner");
+    Require(carsLoaded_, "Weighted car selection requires its canonical CarInfo owner");
     const std::int32_t category = parameters.selectedScenario / 10;
     const std::int32_t weight = category == 6 ? 4 : category - 1;
     Require(weight >= 0 && weight < 5, "Race selection has no valid authored car-weight column");
     const auto eligible = [&](const CarDefinition& car) {
-        return car.bodyCategory == bodyCategory && !car.geometryPath.empty() &&
+        return car.bodyCategory == bodyCategory && IsAvailable(static_cast<std::size_t>(car.modelCode)) &&
             (routeVehicleClass == -1 || car.routeVehicleClass == routeVehicleClass) &&
             AvailableSkinCount(static_cast<std::size_t>(car.modelCode)) > 0;
     };
     const auto selectionWeight=[&](const CarDefinition& car) {
         const auto authored=car.selectionWeights[static_cast<std::size_t>(weight)];
         if(authored!=0.0f)return authored;
+        if(car.originalModelCode>=0)return 1.0f;
         if(allowNfsEdition && car.bodyCategory==0 && car.pursuitConfiguration)return 1.0f;
         if(allowCutTraffic && car.bodyCategory==2 && IsRestoredTrafficModel(car.modelCode))return 1.0f;
         return authored;
@@ -567,12 +577,117 @@ bool CarInfoResource::WeightedPickRide(CarAppearanceSelection& output, std::int3
 }
 
 const CarPerformance& CarInfoResource::Acceleration(std::size_t modelCode) const {
-    Require(modelCode < CarCount, "Acceleration table model code is outside 0..63");
+    Require(modelCode < cars_.size(), "Acceleration table model code is outside the loaded catalogue");
     return cars_[modelCode].performance;
 }
 
 SampledCurve CarInfoResource::AccelerationCurve(std::size_t modelCode) const {
     return carPerformanceCurve(&Acceleration(modelCode));
+}
+
+std::int32_t CarInfoResource::OriginalModel(std::size_t model) const {
+    const auto& car=Car(model);
+    return car.originalModelCode>=0 ? car.originalModelCode:static_cast<std::int32_t>(model);
+}
+
+void CarInfoResource::LoadAdditionalCars(const std::vector<std::uint8_t>& package)
+{
+    Require(carsLoaded_ && skinsLoaded_ && cars_.size()==CarCount,
+        "Restored content requires the unextended production catalogue");
+    Require(package.size()>=24 && std::memcmp(package.data(),"RESTCARS",8)==0 &&
+        ReadU32(package.data()+8)==3,"Unsupported restored-content catalogue");
+    const auto count=ReadU32(package.data()+12),skinCount=ReadU32(package.data()+16),patchCount=ReadU32(package.data()+20);
+    constexpr std::size_t recordBytes=288;
+    Require(count==4 && count<=NativeCarCapacity-CarCount && skinCount<=64 && patchCount<=8 &&
+        package.size()==24u+count*recordBytes+skinCount*64u+patchCount*32u,"Restored-content catalogue is truncated");
+    std::vector<CarDefinition> definitions;
+    std::vector<Appearance> appearances;
+    std::vector<CarSkin> extraSkins;
+    std::unordered_set<std::string> names;
+    for(std::size_t i=0;i<count;++i) {
+        const auto* p=package.data()+24+i*recordBytes;
+        const auto donor=ReadU32(p),nfs=ReadU32(p+8),choices=ReadU32(p+12);
+        Require(donor<CarCount && nfs<=1 && choices>0 && choices<=10,"Invalid restored car identity");
+        auto car=cars_[donor];car.originalModelCode=static_cast<std::int32_t>(donor);
+        car.presentationName=car.name;car.modelCode=static_cast<std::int32_t>(CarCount+i);
+        car.name=Text(p+16,24);car.baseName=Text(p+40,8);
+        car.geometryCompressedPath=Text(p+48,32);car.geometryPath=car.geometryCompressedPath;
+        Require(car.geometryPath.size()>=4,"Restored geometry filename is truncated");
+        car.geometryPath.replace(car.geometryPath.size()-4,4,".BUN");
+        car.nativeDisplayName=Text(p+80,64);car.pursuitConfiguration=nfs!=0;
+        if(nfs)car.selectionSortOrder=1; // Same NFS Edition bank as the release reward variants.
+        car.dashboardGeometryPath.clear();car.supportsDashboardTextures=false;
+        Require(!car.name.empty() && !car.baseName.empty() && !car.nativeDisplayName.empty() &&
+            car.geometryCompressedPath.compare(0,14,"EXTR/GEOMETRY/")==0 &&
+            car.geometryCompressedPath.size()<32 && car.geometryCompressedPath.find("..") == std::string::npos &&
+            names.insert(car.name).second,"Invalid restored car resource names");
+        auto appearance=appearance_[donor];appearance.visual.modelCode=car.modelCode;
+        appearance.skins={};appearance.skins.count=static_cast<std::uint8_t>(choices);
+        std::set<std::int8_t> numbers;
+        for(std::size_t s=0;s<choices;++s) {
+            const auto number=SignedByte(p+144+s);
+            Require(number>0 && number<=16 && numbers.insert(number).second,"Invalid restored car paint choices");
+            appearance.skins.numbers[s]=number;
+        }
+        car.defaultSkinNumber=appearance.skins.numbers[0];
+        for(std::size_t w=0;w<4;++w) {
+            const auto* wheel=p+160+w*32;auto& visual=car.nativeVisualWheels[w];
+            for(std::size_t a=0;a<3;++a)visual.position[a]=Float(wheel+a*4);
+            visual.radius=Float(wheel+12);visual.halfWidth=Float(wheel+16);
+            visual.meshIndex=ReadU32(wheel+20);visual.sideValue=Float(wheel+24);
+            Require(visual.radius>0 && visual.radius<5 && visual.halfWidth>0 && visual.halfWidth<5,
+                "Invalid restored visual wheel dimensions");
+        }
+        const auto physics=car.PhysicsInfo();
+        Require(carPerformanceBuild(&car.performance,&physics,&carPerformanceDefaultTuning)!=0,
+            "Restored production physics is invalid");
+        definitions.push_back(std::move(car));appearances.push_back(appearance);
+    }
+    std::set<std::uint64_t> keys;
+    for(const auto& skin:skins_)keys.insert((std::uint64_t(skin.modelCode)<<32)|skin.skinNumber);
+    for(std::size_t i=0;i<skinCount;++i) {
+        const auto* p=package.data()+24+count*recordBytes+i*64;
+        CarSkin skin;skin.modelCode=static_cast<std::int32_t>(ReadU32(p));skin.skinNumber=static_cast<std::int32_t>(ReadU32(p+4));
+        skin.displayName=Text(p+8,32);skin.selectionMask=ReadU32(p+40);
+        skin.lightMaterialKey=ReadU32(p+44);skin.colorSwatchTextureKey=ReadU32(p+48);
+        skin.bodyGeometryBaseName=Text(p+52,8);
+        Require(skin.bodyGeometryBaseName.empty() ||
+            (skin.modelCode==32 && skin.skinNumber==3 && skin.bodyGeometryBaseName=="P03"),
+            "Restored paint has an unsupported body UV owner");
+        Require(skin.modelCode>=0 && static_cast<std::size_t>(skin.modelCode)<CarCount+count &&
+            skin.skinNumber>0 && skin.skinNumber<=16 && !skin.displayName.empty() &&
+            keys.insert((std::uint64_t(skin.modelCode)<<32)|skin.skinNumber).second,
+            "Invalid restored skin record");
+        extraSkins.push_back(std::move(skin));
+    }
+    for(std::size_t i=0;i<count;++i)for(std::size_t s=0;s<appearances[i].skins.count;++s)
+        Require(keys.count((std::uint64_t(CarCount+i)<<32)|appearances[i].skins.numbers[s])!=0,
+            "Restored car paint has no metadata");
+    // Validate every original-car edit before publishing any of them.
+    std::vector<std::pair<std::size_t,CarSkinChoices>> patches;
+    for(std::size_t i=0;i<patchCount;++i) {
+        const auto* p=package.data()+24+count*recordBytes+skinCount*64+i*32;
+        const auto model=ReadU32(p),choices=ReadU32(p+4);
+        Require(model<CarCount && choices>0 && choices<=10,"Invalid restored original paint table");
+        CarSkinChoices patch;patch.count=static_cast<std::uint8_t>(choices);
+        std::set<std::int8_t> numbers;
+        for(std::size_t s=0;s<choices;++s) {
+            const auto number=SignedByte(p+16+s);
+            Require(number>0 && number<=16 && numbers.insert(number).second &&
+                keys.count((std::uint64_t(model)<<32)|number)!=0,"Restored original paint is absent or repeated");
+            patch.numbers[s]=number;
+        }
+        patches.push_back({model,patch});
+    }
+    for(std::size_t i=0;i<count;++i) {appearance_[CarCount+i]=appearances[i];cars_.push_back(std::move(definitions[i]));}
+    for(auto& skin:extraSkins)if(skin.modelCode>=static_cast<std::int32_t>(CarCount) || applicationNativeGameplay.restoredCarContent)
+        skins_.push_back(std::move(skin));
+    if(applicationNativeGameplay.restoredCarContent)for(const auto& patch:patches) {
+        appearance_[patch.first].skins=patch.second;
+        auto& car=cars_[patch.first];
+        if(std::find(patch.second.numbers.begin(),patch.second.numbers.begin()+patch.second.count,car.defaultSkinNumber)==patch.second.numbers.begin()+patch.second.count)
+            car.defaultSkinNumber=patch.second.numbers[0];
+    }
 }
 
 PhysicsCarInfo CarDefinition::PhysicsInfo() const noexcept {

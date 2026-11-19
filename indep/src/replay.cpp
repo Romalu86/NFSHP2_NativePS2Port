@@ -1,4 +1,5 @@
 #include "indep/inc/Replay.hpp"
+#include "indep/inc/Flags.hpp"
 #include "indep/inc/Timer.hpp"
 #include <cstring>
 #include "indep/inc/DemoModeReplay.hpp"
@@ -7,8 +8,10 @@
 #include "indep/inc/CarDriver.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <new>
+#include <stdexcept>
 
-void ReplayStreamIndex::Build(const BitStream& source)
+void ReplayStreamIndex::Build(const BitStream& source,std::uint32_t nativeStateVersion)
 {
     hp2::Require(source.bytes && source.channelCount==4 && source.dataStart==192 &&
         source.storageBytes<=INT32_MAX/8 && source.storageBytes>=source.dataStart &&
@@ -52,6 +55,7 @@ void ReplayStreamIndex::Build(const BitStream& source)
         for(std::uint32_t i=0;i<events;++i)
             hp2::Require((read(19,0)>>16)<2,"Demo input contains an unsupported joystick port");
         (void)read(8,2);
+        if(nativeStateVersion>=14)(void)read(32,3);
         save();
     }
     hp2::Require(reader.readCount==reader.writeCount && reader.readPosition==reader.writePosition,
@@ -133,6 +137,8 @@ void replaySnapshotInitialize(ReplaySnapshot* snapshot,const char* name,const Ga
     snapshot->wireFormat=REPLAY_SNAPSHOT_NATIVE;
     snapshot->clockPolicy=clock->worldTimerPolicy;
     snapshot->steeringPolicy=clock->nativeTimingEnabled ? REPLAY_STEERING_TIME_BASED:REPLAY_STEERING_LEGACY;
+    snapshot->nativeStrongerOpponents=0;
+    snapshot->nativeStateVersion=14;
     snapshot->sourcePlayerTokens[0]=0;snapshot->sourcePlayerTokens[1]=0;
 }
 
@@ -150,7 +156,7 @@ void replaySnapshotWriteData(ReplaySnapshot* snapshot,const void* values,int32_t
 {
     if (!TransferBinding(snapshot,values,bytes,maximumBytes))return;
     const auto end=static_cast<uint64_t>(snapshot->cursor)+static_cast<uint32_t>(bytes);
-    if (end>REPLAY_SNAPSHOT_WRITE_LIMIT || end>snapshot->capacity) {
+    if ((snapshot->nativeStateVersion<14 && end>REPLAY_SNAPSHOT_WRITE_LIMIT) || end>snapshot->capacity) {
         snapshot->overflowReported=1;snapshot->result=REPLAY_SNAPSHOT_CAPACITY;return;
     }
     const auto* source=static_cast<const uint8_t*>(values);
@@ -404,8 +410,13 @@ void replayManagerRequestStop(ReplayManager* replay)
 void replayManagerWrite(ReplayManager* replay, uint32_t value, uint32_t bits, uint32_t channel)
 {
     if (!replay->recording) return;
-    (void)bitStreamWrite(replay->stream, value, bits, channel);
-    if (streamFull(replay->stream)) {
+    // PAL stops at the fixed PS2 recording allocation. Grow the owned PC
+    // stream before its next value, retaining the complete input history and
+    // every snapshot's absolute bit offsets. Stopping after an otherwise
+    // successful write could truncate a frame and make Save reject it.
+    if ((streamFull(replay->stream) &&
+         (!replay->owner || !replay->owner->EnsureRecordingSpace())) ||
+        !bitStreamWrite(replay->stream, value, bits, channel)) {
         replay->recording = 0;
         replayManagerRequestStop(replay);
     }
@@ -425,6 +436,31 @@ struct ReplayManagerOwner::Storage {
     std::unique_ptr<BitStream> repeat;
     std::vector<uint8_t> recordingBytes;
 };
+
+bool ReplayManagerOwner::EnsureRecordingSpace()
+{
+    auto& owner=*storage_;auto& state=owner.state;
+    if(!state.stream || owner.borrowedDemoPayload || !owner.repeat ||
+        state.stream!=owner.repeat.get() || owner.recordingBytes.empty() ||
+        state.stream->bytes!=owner.recordingBytes.data())return false;
+    auto& stream=*state.stream;
+    if(!streamFull(&stream))return true;
+    // bRepeat uses signed 32-bit bit positions in its existing wire format.
+    // This is its representable extent, not an arbitrary race-time cap.
+    constexpr std::size_t maximumBytes=INT32_MAX/8u;
+    const auto oldSize=owner.recordingBytes.size();
+    if(oldSize>=maximumBytes)return false;
+    const auto nextSize=std::min(maximumBytes,oldSize*2u);
+    try {owner.recordingBytes.resize(nextSize);}
+    catch(const std::bad_alloc&) {return false;}
+    catch(const std::length_error&) {return false;}
+    stream.bytes=owner.recordingBytes.data();
+    stream.capacity=static_cast<uint32_t>(nextSize);
+    stream.storageBytes=stream.capacity;
+    hp2::Require(bitStreamStore(&stream)==BIT_STREAM_OK,
+        "Expanded native replay cannot publish its preserved stream header");
+    return true;
+}
 
 void ReplayManagerOwner::BindRace(GameSession& coordinator,RaceParameters& parameters,
     const GameTime& clock,const CarDriverAppearanceCatalogue& characters,GameInputRouter& input)
@@ -459,6 +495,8 @@ ReplayManagerOwner::ReplayManagerOwner(hp2::frontend::DemoModeReplay& demo)
     auto& state=owner.state;
     state.owner=this;
     state.steeringPolicy=REPLAY_STEERING_TIME_BASED;
+    state.nativeStrongerOpponents=hp2::applicationNativeGameplay.strongerOpponents?1:0;
+    state.nativeStateVersion=14;
     state.firstSourceReferenceMismatchLoop=-1;
     state.lapSnapshotSpacing=15.0f;
     state.nextFancyDebugTime=9999999;
@@ -480,6 +518,8 @@ ReplayManagerOwner::ReplayManagerOwner(hp2::frontend::DemoModeReplay& demo)
         state.synchronizationPolicy=hp2::ReadU32(demo.metadata_)==8u?
             REPLAY_SYNC_PAL_REFERENCE:REPLAY_SYNC_NATIVE_STRICT;
         state.steeringPolicy=owner.snapshots.front()->snapshot.steeringPolicy;
+        state.nativeStrongerOpponents=owner.snapshots.front()->snapshot.nativeStrongerOpponents;
+        state.nativeStateVersion=owner.snapshots.front()->snapshot.nativeStateVersion;
     }
     owner.demo=&demo;demo.replayBorrower_=this;
 }
@@ -518,6 +558,20 @@ const ReplaySnapshotStorage* ReplayManagerOwner::ActiveSnapshotStorage(std::size
 {
     return index<storage_->snapshots.size()?storage_->snapshots[index].get():nullptr;
 }
+bool ReplayManagerOwner::HasRaceRecording() const noexcept
+{
+    const auto& owner=*storage_;const auto& state=owner.state;
+    if(!state.stream || !state.stream->bytes || !state.stream->writeCount ||
+        state.stream->result!=BIT_STREAM_OK || state.beginCapturingLoopCount<0 ||
+        state.endCapturingLoopCount<=state.beginCapturingLoopCount)return false;
+    for(const auto& node:owner.snapshots) {
+        const auto& snapshot=node->snapshot;
+        if(!std::strcmp(snapshot.name,"LAP_SNAPSHOT") && snapshot.bytes && snapshot.dataSize>0 &&
+            snapshot.result==REPLAY_SNAPSHOT_OK && snapshot.worldLoopCounter<=state.beginCapturingLoopCount)
+            return true;
+    }
+    return false;
+}
 
 void ReplayManagerOwner::MarkTheBeginningOfTime(const GameTime& clock,std::size_t availableBytes)
 {
@@ -526,6 +580,8 @@ void ReplayManagerOwner::MarkTheBeginningOfTime(const GameTime& clock,std::size_
     owner.clock=&clock;
     if (state.beginCapturingLoopCount!=-1)return;
     state.steeringPolicy=clock.nativeTimingEnabled ? REPLAY_STEERING_TIME_BASED:REPLAY_STEERING_LEGACY;
+    state.nativeStrongerOpponents=hp2::applicationNativeGameplay.strongerOpponents?1:0;
+    state.nativeStateVersion=14;
     state.endCapturingLoopCount=clock.worldLoopCounter;
     state.beginCapturingLoopCount=clock.worldLoopCounter;
     state.beginCapturingTime=clock.worldTimer;state.endCapturingTime=clock.worldTimer;
@@ -582,7 +638,10 @@ int replayManagerAddSpecialEvent(ReplayManager& replay,hp2::frontend::RaceScreen
     const ReplaySpecialEventInfo event{kind,services.frontend->ui->clock->worldLoopCounter,argument1,argument2};
     if (replay.beginCapturingLoopCount!=-1 && !replay.stopRequested && replay.stream) {
         hp2::Require(replay.specialEventCount>=0,"Replay special event count is corrupt");
-        if (replay.specialEventCount<256)replay.specialEvents[replay.specialEventCount++]=event;
+        if(replay.nativeStateVersion>=14 && static_cast<std::size_t>(replay.specialEventCount)==replay.specialEvents.size())
+            replay.specialEvents.resize(replay.specialEvents.size()*2);
+        if(static_cast<std::size_t>(replay.specialEventCount)<replay.specialEvents.size())
+            replay.specialEvents[replay.specialEventCount++]=event;
         else replayManagerRequestStop(&replay);
     }
     return replayManagerHandleSpecialEvent(replay,services,event);
@@ -650,14 +709,20 @@ void TransferManagerState(ReplayManager& state,ReplaySnapshot& snapshot)
     replaySnapshotMoveInteger(&snapshot,&state.endCapturingLoopCount,4);
     replaySnapshotMoveInteger(&snapshot,&state.snapshotsTaken,4);
     hp2::Require(snapshot.result==REPLAY_SNAPSHOT_OK,"Replay manager snapshot header is truncated");
-    hp2::Require(state.snapshotsTaken>=0 && state.snapshotsTaken<=4096,
-        "Replay manager snapshot exceeds the original snapshot-time allocation");
+    hp2::Require(state.snapshotsTaken>=0 &&
+        (snapshot.nativeStateVersion>=14 ? static_cast<std::uint64_t>(state.snapshotsTaken)*4<=snapshot.capacity:
+            state.snapshotsTaken<=4096),"Replay manager snapshot-time extent is invalid");
+    if(static_cast<std::size_t>(state.snapshotsTaken)>state.snapshotTimes.size())
+        state.snapshotTimes.resize(state.snapshotsTaken);
     for(int32_t index=0;index<state.snapshotsTaken;++index)
         replaySnapshotMoveInteger(&snapshot,&state.snapshotTimes[index],4);
     replaySnapshotMoveInteger(&snapshot,&state.specialEventCount,4);
     hp2::Require(snapshot.result==REPLAY_SNAPSHOT_OK,"Replay manager snapshot times are truncated");
-    hp2::Require(state.specialEventCount>=0 && state.specialEventCount<=256,
-        "Replay manager snapshot exceeds the original special-event allocation");
+    hp2::Require(state.specialEventCount>=0 &&
+        (snapshot.nativeStateVersion>=14 ? static_cast<std::uint64_t>(state.specialEventCount)*16<=snapshot.capacity:
+            state.specialEventCount<=256),"Replay manager special-event extent is invalid");
+    if(static_cast<std::size_t>(state.specialEventCount)>state.specialEvents.size())
+        state.specialEvents.resize(state.specialEventCount);
     static_assert(sizeof(ReplaySpecialEventInfo)==16);
     for(int32_t index=0;index<state.specialEventCount;++index)
         replaySnapshotMoveData(&snapshot,&state.specialEvents[index],16,-1,0);
@@ -678,9 +743,9 @@ void ReplayManagerOwner::DoEndSnapshot(ReplaySnapshot& snapshot)
     state.beginCapturingLoopCount=staged->beginCapturingLoopCount;
     state.endCapturingLoopCount=staged->endCapturingLoopCount;
     state.snapshotsTaken=staged->snapshotsTaken;
-    std::copy_n(staged->snapshotTimes,state.snapshotsTaken,state.snapshotTimes);
+    state.snapshotTimes=std::move(staged->snapshotTimes);
     state.specialEventCount=staged->specialEventCount;
-    std::copy_n(staged->specialEvents,state.specialEventCount,state.specialEvents);
+    state.specialEvents=std::move(staged->specialEvents);
 }
 
 ReplayCaptureRange ReplayManagerOwner::ValidateStateSnapshot(const ReplaySnapshot& source)
@@ -715,16 +780,28 @@ ReplaySnapshot* ReplayManagerOwner::TakeSnapshot(const char* name)
     hp2::Require(owner.clock,"Replay capture has no actual race clock");
     if(owner.freeSnapshots.empty())owner.freeSnapshots.push_back(AllocateReplaySnapshot());
     auto node=std::move(owner.freeSnapshots.front());owner.freeSnapshots.erase(owner.freeSnapshots.begin());
+    if(state.nativeStateVersion>=14 && !std::strcmp(name,"REPLAY_MANAGER_STATE")) {
+        const auto required=std::size_t{1024}+std::size_t(state.snapshotsTaken)*4+std::size_t(state.specialEventCount)*16;
+        hp2::Require(required<=INT32_MAX,"Native replay manager exceeds its wire extent");
+        if(node->allocation.size()<required) {
+            node->allocation.resize(required);node->snapshot.bytes=node->allocation.data();
+            node->snapshot.capacity=static_cast<std::uint32_t>(node->allocation.size());
+        }
+    }
     auto* snapshot=&node->snapshot;owner.snapshots.push_back(std::move(node));
     const auto oldSnapshotCount=state.snapshotsTaken;
     const auto oldLastSnapshotTime=state.lastSnapshotTime;
     try {
         replaySnapshotInitialize(snapshot,name,owner.clock);
         snapshot->steeringPolicy=state.steeringPolicy;
+        snapshot->nativeStrongerOpponents=state.nativeStrongerOpponents;
+        snapshot->nativeStateVersion=state.nativeStateVersion;
         hp2::Require(snapshot->result==REPLAY_SNAPSHOT_OK,"Replay snapshot initialization failed");
         if(owner.clock->worldLoopCounter==state.endCapturingLoopCount) {
             hp2::Require(state.snapshotsTaken>=0,"Replay snapshot-time count is invalid");
-            if(state.snapshotsTaken<4096)
+            if(state.nativeStateVersion>=14 && static_cast<std::size_t>(state.snapshotsTaken)==state.snapshotTimes.size())
+                state.snapshotTimes.resize(state.snapshotTimes.size()*2);
+            if(static_cast<std::size_t>(state.snapshotsTaken)<state.snapshotTimes.size())
                 state.snapshotTimes[state.snapshotsTaken++]=owner.clock->worldLoopCounter;
         }
         state.lastSnapshotTime=owner.clock->worldLoopCounter;
@@ -762,6 +839,8 @@ void ReplayManagerOwner::RestoreSnapshot(ReplaySnapshot& snapshot)
     hp2::Require(owner.clock,"Replay restoration has no actual race clock");
     hp2::Require(snapshot.steeringPolicy==REPLAY_STEERING_LEGACY ||
         snapshot.steeringPolicy==REPLAY_STEERING_TIME_BASED,"Replay snapshot has an unsupported steering policy");
+    hp2::Require(snapshot.nativeStrongerOpponents==0 || snapshot.nativeStrongerOpponents==1,
+        "Replay snapshot has an unsupported native opponent rule");
     if(!std::strcmp(snapshot.name,"REPLAY_MANAGER_STATE"))ValidateStateSnapshot(snapshot);
     else if(owner.borrowedDemoPayload && owner.demo && owner.demo->active) {
         hp2::Require(owner.parameters && owner.characters,"Demo restore has no actual parameter/character owners");
@@ -835,6 +914,8 @@ void ReplayManagerOwner::RestoreSnapshot(ReplaySnapshot& snapshot)
         hp2::Require(worldValidateReplayState(owner.coordinator->bindings->world,owner.clock)!=0,
             "Replay snapshot restored nonfinite native World/Car state");
     owner.state.steeringPolicy=snapshot.steeringPolicy;
+    owner.state.nativeStrongerOpponents=snapshot.nativeStrongerOpponents;
+    owner.state.nativeStateVersion=snapshot.nativeStateVersion;
     owner.state.exhausted=0;owner.state.lastSnapshotTime=owner.clock->worldLoopCounter;
 }
 bool ReplayManagerOwner::RestoreSnapshot(const char* name)
@@ -847,8 +928,8 @@ bool ReplayManagerOwner::RestoreSnapshot(const char* name)
 bool ReplayManagerOwner::WasSnapshotTakenAtThisTime(int32_t worldLoop)
 {
     auto& state=storage_->state;
-    hp2::Require(state.snapshotsTaken>=0 && state.snapshotsTaken<=4096 &&
-        state.lastSnapshotIndex>=0 && state.lastSnapshotIndex<4096,
+    hp2::Require(state.snapshotsTaken>=0 && static_cast<std::size_t>(state.snapshotsTaken)<=state.snapshotTimes.size() &&
+        state.lastSnapshotIndex>=0 && static_cast<std::size_t>(state.lastSnapshotIndex)<state.snapshotTimes.size(),
         "Replay snapshot-time search has invalid native bounds");
     int32_t first=0;
     if(state.lastSnapshotIndex && state.snapshotTimes[state.lastSnapshotIndex]<worldLoop)
@@ -943,6 +1024,8 @@ void ReplayManagerOwner::DoChecksumSnapshot(const char* name)
         try {
             replaySnapshotInitialize(snapshot,name,owner.clock);
             snapshot->steeringPolicy=state.steeringPolicy;
+            snapshot->nativeStrongerOpponents=state.nativeStrongerOpponents;
+            snapshot->nativeStateVersion=state.nativeStateVersion;
             hp2::Require(snapshot->result==REPLAY_SNAPSHOT_OK,
                 "Replay checksum snapshot initialization failed");
             snapshot->cursor=0;snapshot->recordingChecksums=1;
@@ -1057,8 +1140,8 @@ void ReplayManagerOwner::BeginFrame(const GameTime& clock,hp2::frontend::RaceScr
     if(state.restoring) {
         if(state.paused)state.replayPausedThisFrame=1;
         else if(state.slowMotion)state.replayPausedThisFrame=clock.realLoopCounter%4!=0;
-        hp2::Require(state.specialEventCount>=0 && state.specialEventCount<=256,
-            "Replay special-event count exceeds its original allocation");
+        hp2::Require(state.specialEventCount>=0 && static_cast<std::size_t>(state.specialEventCount)<=state.specialEvents.size(),
+            "Replay special-event count exceeds its owned allocation");
         if(state.specialEventCount) {
             auto index=state.lastSpecialEventNumber;
             hp2::Require(index<state.specialEventCount,"Replay special-event cursor is out of range");

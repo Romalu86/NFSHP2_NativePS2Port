@@ -597,7 +597,7 @@ void EndGameFlowLoadingTrackSpecific(ApplicationFrontendFlow& flow,const GameFlo
             }
         }
     }
-    Require(first && first->appearance.modelCode>=0 && first->appearance.modelCode<64,
+    Require(first && first->appearance.modelCode>=0 && static_cast<std::size_t>(first->appearance.modelCode)<phase.cars.Count(),
         "Track activation has no selected presentation car");
     Require(phase.cars.IsAvailable(static_cast<std::size_t>(first->appearance.modelCode)),
         "Track presentation car is absent from the actual catalogue");
@@ -899,6 +899,15 @@ void GameFlowLoadingTrackCommonPart2(ApplicationFrontendFlow& flow,const GameFlo
                 const auto renamed=original+std::to_string(duplicate);
                 ecstasyDuplicateSolid(&models,original.c_str(),renamed.c_str());
             }
+            // PC optional paint UVs share production damage ordinals, but
+            // each duplicate car still needs its own mutable A/B solids.
+            for(const auto& skin:bindings.track->cars.Skins())
+                if(skin.modelCode==driver->appearance.modelCode && !skin.bodyGeometryBaseName.empty())
+                    for(const char suffix:{'A','B'}) {
+                        const auto source=skin.bodyGeometryBaseName+"_"+suffix;
+                        const auto target=source+std::to_string(duplicate);
+                        ecstasyDuplicateSolid(&models,source.c_str(),target.c_str());
+                    }
         }
         const auto original=base+"_SCUFFS";
         const auto renamed=original+std::to_string(duplicate);

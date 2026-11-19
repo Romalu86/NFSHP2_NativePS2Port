@@ -23,6 +23,8 @@ uint32_t joystickReadMappedControl(const JoystickControls* controls,uint8_t fiel
         value=controls->sticks[(field-32)/8]>>(field%8);
     } else if(field>=64 && field<160) {
         value=controls->pressures[(field-64)/8]>>(field%8);
+    } else if(field>=160 && field<182) {
+        value=controls->nativeKeyboardActions>>(field-160);
     } else {
         hp2::Require(field==0,"Input mapping is outside logical control fields");
     }
@@ -344,7 +346,8 @@ void joystickSetUserConfiguration(GameInputRouter* router,int32_t port,int32_t c
     router->nativeLayoutChanged[port]=1;
     for(std::size_t i=0;i<router->count;++i) {
         auto& node=router->registrations[i];
-        if(ScannerPort(node)==port && node.event>92 && !NativeDebugTarget(node))ConnectScanner(*router,node);
+        if(ScannerPort(node)==port && node.event>92 && !NativeDebugTarget(node) &&
+            !router->keyboardDrivingLayout[port])ConnectScanner(*router,node);
     }
 }
 int32_t joystickGetUserConfiguration(const GameInputRouter* router,int32_t port)
@@ -363,6 +366,10 @@ constexpr int8_t layoutE=JOYSTICK_LAYOUT_E,layoutF=JOYSTICK_LAYOUT_F,layoutG=JOY
 // Use the original direct pedal events for native analog pressure. The face
 // button pressure event applies a fourfold multiplier on gamepads.
 constexpr int32_t directThrottle=0x71,directBrake=0x74;
+// PC keyboard actions use the persisted binding slots from the keyboard menu,
+// not a digital/pressure controller's layout or modifier chords. Configuration64
+// is private to this native lookup and is never offered as a gamepad scheme.
+constexpr int8_t nativeKeyboardConfiguration=64;
 constexpr ButtonMapping triggerThrottle(int32_t event,bool brake,bool withLookback)
 {
     return {{withLookback?layoutH:layoutE,withLookback?int8_t{0}:layoutF,withLookback?int8_t{0}:layoutG},
@@ -370,6 +377,22 @@ constexpr ButtonMapping triggerThrottle(int32_t event,bool brake,bool withLookba
         {0,0,brake?uint8_t{144}:uint8_t{152},withLookback?uint8_t{29}:uint8_t{28}}};
 }
 constexpr ButtonMapping buttonMappings[]{
+    {{nativeKeyboardConfiguration},111,154,0,"STEER",ScannerKind::DigitalSteer,{0,0,176,177}},
+    {{nativeKeyboardConfiguration},113,134,0,"ACCELERATE",ScannerKind::DigitalUpOrDown,{0,0,174,0,255}},
+    {{nativeKeyboardConfiguration},116,136,0,"BRAKE",ScannerKind::DigitalUpOrDown,{0,0,175,0,255}},
+    {{nativeKeyboardConfiguration},121,139,0,"HANDBRAKE",ScannerKind::DigitalUpOrDown,{0,0,171,0,255}},
+    {{nativeKeyboardConfiguration},123,141,0,"SHIFT UP",ScannerKind::DigitalUpOrDown,{0,0,169}},
+    {{nativeKeyboardConfiguration},124,140,0,"SHIFT DOWN",ScannerKind::DigitalUpOrDown,{0,0,168}},
+    {{nativeKeyboardConfiguration},125,129,0,"RESET",ScannerKind::DigitalUpOrDown,{0,0,160}},
+    {{nativeKeyboardConfiguration},126,137,0,"HORN",ScannerKind::DigitalUpOrDown,{0,0,173}},
+    {{nativeKeyboardConfiguration},127,143,0,"NITRO",ScannerKind::DigitalUpOrDown,{0,0,162}},
+    {{nativeKeyboardConfiguration},93,135,0,"CAMERA",ScannerKind::DigitalDown,{0,0,172}},
+    {{nativeKeyboardConfiguration},94,138,0,"LOOK BACK",ScannerKind::DigitalUpOrDown,{0,0,170}},
+    {{nativeKeyboardConfiguration},130,130,0,"HUD",ScannerKind::DigitalDown,{0,0,164}},
+    {{nativeKeyboardConfiguration},95,140,0,"ZONE FREEZE",ScannerKind::DigitalDown,{0,0,180}},
+    {{nativeKeyboardConfiguration},96,141,0,"ZONE ZOOM",ScannerKind::DigitalDown,{0,0,181}},
+    {{nativeKeyboardConfiguration},129,140,0,"ROADBLOCK",ScannerKind::DigitalDown,{0,0,180}},
+    {{nativeKeyboardConfiguration},128,141,0,"HELICOPTER",ScannerKind::DigitalDown,{0,0,181}},
     triggerThrottle(directThrottle,false,false),triggerThrottle(directThrottle,false,true),
     triggerThrottle(directBrake,true,false),triggerThrottle(directBrake,true,true),
     {{layoutE,layoutG},122,137,0,"CIRCLE",ScannerKind::Analog,{1,0,104,0,0,0,0,0}},
@@ -661,9 +684,9 @@ int32_t joystickChooseConfiguration(int32_t type,int32_t requested)
     return available[0];
 }
 namespace {
-const ButtonMapping* FindScannerConfig(int32_t event,int32_t type,int32_t requested)
+const ButtonMapping* FindScannerConfig(int32_t event,int32_t type,int32_t requested,bool nativeKeyboard=false)
 {
-    const auto chosen=joystickChooseConfiguration(type,requested);
+    const auto chosen=nativeKeyboard?nativeKeyboardConfiguration:joystickChooseConfiguration(type,requested);
     for (const auto& row:buttonMappings) {
         if (row.event!=event)continue;
         for (const auto config:row.configurations) {
@@ -676,12 +699,14 @@ const ButtonMapping* FindScannerConfig(int32_t event,int32_t type,int32_t reques
 }
 uint32_t joystickGetButtonChar(const GameInputRouter* router,int32_t port,int32_t event)
 {
-    const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port));
+    const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port),
+        InputPort(router,port) && router->nativeHostInput[port] && router->keyboardDrivingLayout[port]);
     return row?row->button:0;
 }
 const char* joystickGetButtonName(const GameInputRouter* router,int32_t port,int32_t event)
 {
-    const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port));
+    const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port),
+        InputPort(router,port) && router->nativeHostInput[port] && router->keyboardDrivingLayout[port]);
     return row && row->name?row->name:"";
 }
 void joystickGetAndShiftButtonChar(const GameInputRouter* router,int32_t port,int32_t event,
@@ -689,7 +714,8 @@ void joystickGetAndShiftButtonChar(const GameInputRouter* router,int32_t port,in
 {
     if (!button || !shift)return;
     *button=0;*shift=0;
-    if (const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port))) {
+    if (const auto* row=FindScannerConfig(event,joystickGetType(router,port),joystickGetUserConfiguration(router,port),
+        InputPort(router,port) && router->nativeHostInput[port] && router->keyboardDrivingLayout[port])) {
         *button=row->button;*shift=row->shift;
     }
 }
@@ -704,7 +730,9 @@ void ConnectScanner(GameInputRouter& router,GameInputRegistration& node)
         (router.nativeMenuInput[port] && node.target.kind==GAME_INPUT_FRONTEND) ||
         (applicationDebugToolsEnabled && NativeDebugTarget(node));
     const auto* configuration=FindScannerConfig(node.event,router.scanners[port].currentType,
-        fixedLayout?0:joystickGetUserConfiguration(&router,port));
+        fixedLayout?0:joystickGetUserConfiguration(&router,port),
+        router.nativeHostInput[port] && router.keyboardDrivingLayout[port] &&
+            node.target.kind!=GAME_INPUT_FRONTEND && !NativeDebugTarget(node));
     node.scannerConfiguration=configuration?static_cast<int32_t>(configuration-buttonMappings):-1;
     node.scannerValue=0;node.scannerInitial=1;
 }
@@ -777,7 +805,7 @@ uint16_t ScanEvent(GameInputRegistration& node,GameInputPortScanner& port,
         uint32_t value=DigitalValue(config,current,previous);
         if (value && f[4])value=f[4];
         if (config.scanner==ScannerKind::DigitalDown && node.scannerInitial) {
-            node.scannerInitial=0;node.scannerValue=value;
+            node.scannerInitial=0;node.scannerValue=f[2]>=160?0:value;
         }
         if (node.scannerValue==value && !node.scannerInitial)return 0;
         node.scannerValue=value;node.scannerInitial=0;
@@ -855,6 +883,13 @@ uint16_t ScanEvent(GameInputRegistration& node,GameInputPortScanner& port,
         const KeyedCurve graph{calibration.keys,4};
         uint32_t value=static_cast<uint8_t>(convertFloatToInt32(keyedCurveEvaluate(&graph,
             static_cast<float>(PadBits(current,f[2],f[0],255)))));
+        // SDL calibration has already normalized native steering to the full
+        // 0..255 travel. The source field's low-bit transform otherwise loses
+        // its physical end stops (0 became1;255 became253 after the curve).
+        if(current->nativeHostInput && node.target.kind==GAME_INPUT_REAL_DRIVER && node.event==0x70 && f[4]==0) {
+            const auto raw=PadBits(current,f[2],0,255);
+            if(raw==0 || raw==255)value=raw;
+        }
         if (f[4]==1) {value=value<127?(127-value)*2:0;if (value==254)value=255;}
         else if (f[4]==2) {value=value>128?(value-128)*2:0;if (value==254)value=255;}
         // Layout H can reuse the triggers for the side views. Release the
@@ -1039,10 +1074,11 @@ int GenerateFromScanners(GameInputRouter& input,int32_t port,int32_t type,
 {
     auto& scanner=input.scanners[port];
     const bool layoutChanged=input.keyboardDrivingLayout[port]!=current->keyboardDrivingLayout;
-    const bool nativeSourceChanged=current->nativeHostInput &&
-        (layoutChanged || input.nativeLayoutChanged[port] || !input.nativeHostInput[port] ||
-            input.nativeMenuInput[port]!=current->nativeMenuInput ||
+    const bool nativeContextChanged=current->nativeHostInput &&
+        (!input.nativeHostInput[port] || input.nativeMenuInput[port]!=current->nativeMenuInput ||
             input.nativeScannerEpoch[port]!=nativeInputResetEpoch[port]);
+    const bool nativeSourceChanged=current->nativeHostInput &&
+        (layoutChanged || (input.nativeLayoutChanged[port] && !current->keyboardDrivingLayout) || nativeContextChanged);
     input.keyboardDrivingLayout[port]=current->keyboardDrivingLayout;
     input.nativeHostInput[port]=current->nativeHostInput;
     input.nativeMenuInput[port]=current->nativeMenuInput;
@@ -1051,23 +1087,33 @@ int GenerateFromScanners(GameInputRouter& input,int32_t port,int32_t type,
         input.nativeScannerEpoch[port]=nativeInputResetEpoch[port];
         // Clear the old scheme's continuous channels through the same queue
         // recorded by Joylog, including channels absent from the new scheme.
+        // During playback only recorded events may change the RealDriver.
         for(size_t i=0;i<input.count;++i) {
             const auto& node=input.registrations[i];
-            if(node.device==port && node.target.kind==GAME_INPUT_REAL_DRIVER &&
+            if((!replay || !replay->restoring) && node.device==port && node.target.kind==GAME_INPUT_REAL_DRIVER &&
                 node.event>=0x6f && node.event<=0x7a)
                 AddQueuedEvent(input,port,PackedEvent(node,node.event<=0x70?128:0),node);
         }
     }
     if (type!=scanner.currentType) {
-        if (type!=scanner.pendingType) {scanner.pendingType=type;scanner.stableSamples=0;return 0;}
-        if (++scanner.stableSamples<32)return 0;
+        // Native samples are already identified at the logical step boundary.
+        // Retain PAL's handshake debounce only for its original readers: a
+        // keyboard/pad switch on Windows must not drop half a second of input.
+        if(!current->nativeHostInput) {
+            if (type!=scanner.pendingType) {scanner.pendingType=type;scanner.stableSamples=0;return 0;}
+            if (++scanner.stableSamples<32)return 0;
+        }
+        scanner.pendingType=type;scanner.stableSamples=0;
         scanner.currentType=type;
         for (int axis=0;axis<4;++axis)ChooseResponse(scanner.calibration[axis],type,axis);
         for (size_t i=0;i<input.count;++i)if (ScannerPort(input.registrations[i])==port)ConnectScanner(input,input.registrations[i]);
     } else if(layoutChanged || nativeSourceChanged) {
+        // Driving-layout previews do not reset the independent menu repeat state.
         for(size_t i=0;i<input.count;++i)
             if(ScannerPort(input.registrations[i])==port &&
-                (input.registrations[i].event>92 || input.registrations[i].target.kind==GAME_INPUT_FRONTEND))
+                (input.registrations[i].event>92 ||
+                    (input.registrations[i].target.kind==GAME_INPUT_FRONTEND &&
+                        (nativeContextChanged || !current->nativeHostInput))))
                 ConnectScanner(input,input.registrations[i]);
     }
     int generated=0;
@@ -1078,7 +1124,16 @@ int GenerateFromScanners(GameInputRouter& input,int32_t port,int32_t type,
         const auto& config=buttonMappings[node.scannerConfiguration];
         if (replay && replay->restoring && !config.fields[6])continue;
         const bool debug=applicationDebugToolsEnabled && NativeDebugTarget(node) && debugCurrent && debugPrevious;
-        if (const auto event=ScanEvent(node,scanner,config,debug?debugCurrent:current,debug?debugPrevious:previous,videoBlank)) {
+        if (auto event=ScanEvent(node,scanner,config,debug?debugCurrent:current,debug?debugPrevious:previous,videoBlank)) {
+            // PAL RealDriver amplifies the pressure throttle fourfold for a
+            // DS2. PC axes already span the complete pedal travel. Encode
+            // that live axis into the existing source event scale so both
+            // the original consumer and recorded Joylog events stay valid.
+            if(current->nativeHostInput && node.target.kind==GAME_INPUT_REAL_DRIVER &&
+                node.event==0x72 && joystickHasStiffThrottle(&input,port)) {
+                const auto pressure=static_cast<unsigned>(event>>8);
+                event=PackedEvent(node,static_cast<std::uint8_t>((pressure+3u)/4u));
+            }
             AddQueuedEvent(input,node.device,event,node);++generated;
             if(debug && node.target.kind==GAME_INPUT_PLAYER_CAMERA)
                 input.nativeDebug.predictedCameraKind=NextNativeDebugCamera(*node.target.owner.player,input.nativeDebug.predictedCameraKind);
