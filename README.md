@@ -21,6 +21,7 @@ Keep `SDL2.dll` beside `NFSHP2.exe`. A separate Vulkan SDK, Clang, Python or sha
 ## Run
 
 The game detects adjacent archives or extracted resources automatically. With no data detected, select the archive pair, extracted folder or ISO in the startup dialog, then use the launcher. You can also select the source from the command line:
+
 =======
 Place the executable and Extras folder beside the original `ZDIR.BIN` and `ZZDATA.BIN`, or select your game data explicitly:
 
