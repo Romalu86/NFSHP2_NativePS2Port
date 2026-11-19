@@ -5,7 +5,6 @@ Native Windows x64 port of the PlayStation 2 game engine (SLES_507.31 \ SLUS_203
 ## Requirements
 
 - Windows x64 and a hardware GPU with Vulkan 1.1+ drivers.
-<<<<<<< HEAD
 - Complete original PS2 game data: an ISO, a matching `ZDIR.BIN` / `ZZDATA.BIN` pair, or fully extracted resources.
 =======
 - Complete PS2 PAL game data: an ISO, a `ZDIR.BIN` / `ZZDATA.BIN` pair, or fully extracted resources.
@@ -21,7 +20,6 @@ Keep `SDL2.dll` beside `NFSHP2.exe`. A separate Vulkan SDK, Clang, Python or sha
 
 ## Run
 
-<<<<<<< HEAD
 The game detects adjacent archives or extracted resources automatically. With no data detected, select the archive pair, extracted folder or ISO in the startup dialog, then use the launcher. You can also select the source from the command line:
 =======
 Place the executable and Extras folder beside the original `ZDIR.BIN` and `ZZDATA.BIN`, or select your game data explicitly:
@@ -32,7 +30,6 @@ Place the executable and Extras folder beside the original `ZDIR.BIN` and `ZZDAT
 .\NFSHP2.exe --data "D:\Games\NFSHP2.iso"
 ```
 
-<<<<<<< HEAD
 Choose a manually selected source again on a later launch, or pass its path explicitly. For extracted resources, preserve the full directory, including `__Unknown`, `__archive` and `NFSHP2_EXTRACTION_MANIFEST.json`. See [the extraction guide](tools/archive/README.md) for `NFSHP2Unpack` usage.
 
 ## Settings and controls
