@@ -314,6 +314,8 @@ WorldAudioResult soundJukeboxSetSelection(const CarSoundBindings& bindings,
     const RaceParameters& parameters,int32_t selection)
 {
     if (!applicationLaunchOptions.musicEnabled) return WORLD_AUDIO_OK;
+    if(!bindings.globals)return WORLD_AUDIO_INVALID_BINDING;
+    if(!bindings.globals->policy.audioSystemEnabled)return WORLD_AUDIO_OK;
     if (!bindings.audio || (soundJukeboxPlayer.currentSample.instance &&
         soundJukeboxPlayer.audio!=bindings.audio)) return WORLD_AUDIO_INVALID_BINDING;
     // Reject every invalid row before SetCategory or SetTuneOn/Off can

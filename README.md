@@ -5,11 +5,8 @@ Native Windows x64 port of the PlayStation 2 game engine (SLES_507.31 \ SLUS_203
 ## Requirements
 
 - Windows x64 and a hardware GPU with Vulkan 1.1+ drivers.
-<<<<<<< HEAD
 - Complete original PS2 game data: an ISO, a matching `ZDIR.BIN` / `ZZDATA.BIN` pair, or fully extracted resources.
-=======
 - Complete PS2 PAL game data: an ISO, a `ZDIR.BIN` / `ZZDATA.BIN` pair, or fully extracted resources.
->>>>>>> 6e5764e1733c1b061d48845f74e71795b5054103
 - For building: Visual Studio 2022 with **Desktop development with C++**, MSVC v143 and a Windows SDK.
 
 ## Build
@@ -22,11 +19,9 @@ Keep `SDL2.dll` beside `NFSHP2.exe`. A separate Vulkan SDK, Clang, Python or sha
 
 ## Run
 
-<<<<<<< HEAD
 The game detects adjacent archives or extracted resources automatically. With no data detected, select the archive pair, extracted folder or ISO in the startup dialog, then use the launcher. You can also select the source from the command line:
-=======
-Place the executable beside the original `ZDIR.BIN` and `ZZDATA.BIN`, or select your game data explicitly:
->>>>>>> 6e5764e1733c1b061d48845f74e71795b5054103
+
+Place the executable and Extras folder beside the original `ZDIR.BIN` and `ZZDATA.BIN`, or select your game data explicitly:
 
 ```powershell
 .\NFSHP2.exe --data "D:\Games\NFSHP2\@ZZDATA"
@@ -34,7 +29,6 @@ Place the executable beside the original `ZDIR.BIN` and `ZZDATA.BIN`, or select 
 .\NFSHP2.exe --data "D:\Games\NFSHP2.iso"
 ```
 
-<<<<<<< HEAD
 Choose a manually selected source again on a later launch, or pass its path explicitly. For extracted resources, preserve the full directory, including `__Unknown`, `__archive` and `NFSHP2_EXTRACTION_MANIFEST.json`. See [the extraction guide](tools/archive/README.md) for `NFSHP2Unpack` usage.
 
 ## Settings and controls
@@ -52,7 +46,6 @@ Keep the `Saves/` folder beside the executable when updating. The game migrates 
 Wine/Proton uses the existing XAudio2 PCM audio path. The DualSense speaker feature uses the native Windows endpoint. Wine/Proton playback has not been tested with this build.
 
 Third-party notices: [SDL2](third_party/SDL2/LICENSE.txt) · [Vulkan headers](third_party/vulkan/LICENSE.md) · [Vulkan loader](third_party/vulkan/LICENSE-Loader.txt) · [SMAA](third_party/smaa/LICENSE.txt).
-=======
 These are alternative launch methods. The game also searches for supported data beside the executable. For extracted resources, preserve the full directory, including `__Unknown`, `__archive` and `NFSHP2_EXTRACTION_MANIFEST.json`. See [the extraction guide](tools/archive/README.md) for `NFSHP2Unpack` usage.
 
 ## Settings and controls
@@ -68,4 +61,3 @@ Profiles, settings and logs are stored in `Saves/` beside the executable. Keep t
 The port is still under development. Wine/Proton audio compatibility is not verified in this base version.
 
 Third-party notices: [SDL2](third_party/SDL2/LICENSE.txt) · [Vulkan headers](third_party/vulkan/LICENSE.md) · [Vulkan loader](third_party/vulkan/LICENSE-Loader.txt).
->>>>>>> 6e5764e1733c1b061d48845f74e71795b5054103

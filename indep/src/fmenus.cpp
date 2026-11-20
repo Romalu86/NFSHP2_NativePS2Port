@@ -1358,5 +1358,12 @@ extern "C" GameInputResult flailerFrontendDispatchInput(FlailerFrontendInput* in
 {
     if (!input || !input->screens || input->screens->input!=input) return GAME_INPUT_INVALID_BINDING;
     try { input->screens->JoyHandler(port,event,value);return GAME_INPUT_OK; }
-    catch (const std::exception&) { return GAME_INPUT_OWNER_FAILURE; }
+    catch (const std::exception& error) {
+        char detail[512]{};
+        std::snprintf(detail,sizeof(detail),"port=%d event=%d value=%u error=%s",port,event,
+            static_cast<unsigned>(value),error.what());
+        hp2::platform::RecordSessionEvent("input.frontend.callback_failure",detail);
+        std::fprintf(stderr,"Frontend input callback failed: %s\n",detail);
+        return GAME_INPUT_OWNER_FAILURE;
+    }
 }

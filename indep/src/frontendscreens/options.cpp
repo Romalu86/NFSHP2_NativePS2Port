@@ -1531,12 +1531,15 @@ void FrontendPlayerManager::AppendMissingMusicTracks(const CarSoundBindings& sou
 void FrontendPlayerManager::ApplyAudioOptions(const CarSoundBindings& bindings,
     const RaceParameters& parameters,FlailerSoundState& uiSound) const
 {
-    Require(bindings.audio && bindings.audio->library && uiSound.audio==bindings.audio &&
+    Require(bindings.globals && bindings.audio && bindings.audio->library && uiSound.audio==bindings.audio &&
         uiSound.manager==&bindings.audio->library->Mixer() && uiSound.volumes &&
         bindings.volumes==uiSound.volumes,"Saved audio options have no shared canonical mixer and speech-volume owner");
-    Require(nativeAudioProfileValid(musicSettings,applicationLaunchOptions.musicEnabled?&soundJukeboxPlayer:nullptr),
+    const bool liveMusic=applicationLaunchOptions.musicEnabled && bindings.globals->policy.audioSystemEnabled;
+    // A Windows session without playback endpoints retains its saved
+    // settings and logical mixer, but has no live music cartridge.
+    Require(nativeAudioProfileValid(musicSettings,liveMusic?&soundJukeboxPlayer:nullptr),
         "Saved audio options must pass validation before changing the live mixer");
-    Require(!applicationLaunchOptions.musicEnabled || soundJukeboxPlayer.audio==bindings.audio,
+    Require(!liveMusic || soundJukeboxPlayer.audio==bindings.audio,
         "Saved playlist has no shared canonical jukebox owner");
     // Complete final SetSoundFromAudioOptions1EF120. Category order is
     // source5,4,0,6,2,3,1, followed by speech-volume save, playlist and mode.
